@@ -1,0 +1,32 @@
+log_level: INFO
+schedules:
+  day: "*/10 9-16 * * 1-5"
+  swing: "0 */30 9-16 * * 1-5"
+  hold: "0 18 * * 1-5"
+watchlists:
+  equities: ["AAPL", "MSFT"]
+  crypto: ["BTCUSDT", "ETHUSDT"]
+provider_keys:
+  alphavantage_key: null
+  polygon_key: null
+  finnhub_key: null
+exchange_keys:
+  binance_key: null
+  binance_secret: null
+  binanceus_key: null
+  binanceus_secret: null
+  robinhood_crypto_key: null
+  robinhood_crypto_secret: null
+alerts:
+  slack_webhook_url: null
+  telegram_bot_token: null
+  telegram_chat_id: null
+  smtp_host: null
+  smtp_port: 587
+  smtp_user: null
+  smtp_from: null
+  smtp_tls: true
+database_url: "sqlite+aiosqlite:///./confluence.db"
+verify_timeout_seconds: 3.0
+min_sources_required: 2
+

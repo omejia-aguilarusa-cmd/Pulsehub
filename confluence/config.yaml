@@ -1,0 +1,32 @@
+timezone: "America/New_York"
+universe:
+  equities_watch: [SPY, QQQ, DIA, IWM]
+  mega_caps: [AAPL, MSFT, NVDA, META, AMZN, GOOGL]
+  sectors: [SMH, XLK, XLE, XLF, XLV, XLY, XLU, XLP, XLB, XLI, XLRE, ARKK]
+  momentum_pool: "top200_liquid_by_3m_RS"
+  crypto_core: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+  crypto_alt: "top50_by_mcap_ex_stables"
+risk:
+  max_risk_per_trade_pct: 0.5
+  max_daily_drawdown_pct: 2.0
+  max_positions_day: 5
+  avoid_earnings_hold: true
+alerts:
+  min_confluence_score: 70
+  min_rr: 2.0
+  min_prob: 0.55
+data:
+  quotes: ["yahoo", "polygon?api_key=${POLYGON_KEY}"]
+  news: ["newsapi?key=${NEWSAPI_KEY}"]
+  earnings: ["polygon?api_key=${POLYGON_KEY}"]
+brokers:
+  robinhood_crypto: {enabled: true}
+  binance: {enabled: true, base: "binance_us"}
+execution:
+  auto_execute_crypto: false
+  auto_execute_binance: false
+logging:
+  level: "INFO"
+storage:
+  dsn: "sqlite:///confluence.db"
+

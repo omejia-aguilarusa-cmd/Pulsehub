@@ -1,1 +1,28 @@
 target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+
+# Envs
+.venv/
+venv/
+.env
+config/.env
+confluence/.env
+
+# OS
+.DS_Store
+
+# DB/Artifacts
+*.db
+*.sqlite
+confluence.db
+*.db-journal
+
+# Build
+dist/
+build/
