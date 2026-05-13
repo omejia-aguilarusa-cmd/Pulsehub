@@ -7,6 +7,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from takeoff_pro.estimate.models import Assembly, EstimateItem
+
 
 class MeasurementKind(StrEnum):
     """Supported measurement geometry kinds."""
@@ -70,6 +72,8 @@ class TakeoffSection(BaseModel):
     item_number: str | None = None
     order_index: int | None = None
     scale_units: str | None = None
+    estimate_reference_type: str | None = None
+    estimate_reference_id: str | None = None
     source_xml_path: Path | None = None
     measurements: list[Measurement] = Field(default_factory=list)
     raw_properties: dict[str, LegacyProperty] = Field(default_factory=dict)
@@ -122,6 +126,8 @@ class Job(BaseModel):
     source_root: Path
     pages: list[Page] = Field(default_factory=list)
     takeoff_sections: list[TakeoffSection] = Field(default_factory=list)
+    items: list[EstimateItem] = Field(default_factory=list)
+    assemblies: list[Assembly] = Field(default_factory=list)
     autolists: list[Autolist] = Field(default_factory=list)
     raw_properties: dict[str, LegacyProperty] = Field(default_factory=dict)
 

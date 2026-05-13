@@ -45,3 +45,13 @@ The takeoff UI is split this way:
 - `takeoff_pro.ui.main_window.MainWindow` owns the active job, current page, tool selection, scale calibration, and measurements panel.
 
 Scale calibration stores `scale_pixels_per_unit` and `scale_unit` on each page. Imported legacy `ScaleX` values remain available as a fallback when no native calibration is present.
+
+## Phase 4 Estimating Boundary
+
+Estimating is implemented in `takeoff_pro.estimate`:
+
+- `models` defines unit-cost items, assemblies, components, and BOM lines.
+- `library` reads and writes CSV item libraries.
+- `pricing` owns unit conversion and BOM math.
+
+Native jobs store item and assembly libraries directly in `job.json`. A takeoff section attaches to an estimate reference with `estimate_reference_type` and `estimate_reference_id`. Pricing walks each attached section, sums its measurement quantities, converts compatible units, and emits flat BOM lines.
