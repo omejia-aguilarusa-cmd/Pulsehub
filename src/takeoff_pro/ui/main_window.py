@@ -36,6 +36,7 @@ from takeoff_pro.data.planswift_importer import LegacyImportError
 from takeoff_pro.estimate import Assembly, AssemblyComponent, EstimateItem
 from takeoff_pro.estimate.pricing import UnitConversionError, price_job
 from takeoff_pro.render import PageRenderError, render_page_to_image
+from takeoff_pro.reports import export_csv, export_pdf, export_xlsx
 from takeoff_pro.ui.commands import AddMeasurementCommand
 from takeoff_pro.ui.estimate_dialog import EstimateEditorDialog
 from takeoff_pro.ui.scale_dialog import ScaleCalibrationDialog
@@ -108,6 +109,45 @@ class MainWindow(QMainWindow):
             return
         self._show_status(f"Saved {self._job.name}.")
 
+    def export_csv_report(self, file_path: str | Path) -> None:
+        """Export the current job as a flat CSV report."""
+        if self._job is None:
+            self._show_status("Open a job before exporting reports.")
+            return
+        try:
+            output_path = export_csv(self._job, file_path)
+        except (OSError, UnitConversionError) as exc:
+            LOGGER.exception("Could not export CSV report to %s", file_path)
+            QMessageBox.critical(self, "Export CSV Report", str(exc))
+            return
+        self._show_status(f"Exported CSV report: {output_path.name}.")
+
+    def export_xlsx_report(self, file_path: str | Path) -> None:
+        """Export the current job as an XLSX workbook report."""
+        if self._job is None:
+            self._show_status("Open a job before exporting reports.")
+            return
+        try:
+            output_path = export_xlsx(self._job, file_path)
+        except (OSError, UnitConversionError) as exc:
+            LOGGER.exception("Could not export XLSX report to %s", file_path)
+            QMessageBox.critical(self, "Export XLSX Report", str(exc))
+            return
+        self._show_status(f"Exported XLSX report: {output_path.name}.")
+
+    def export_pdf_report(self, file_path: str | Path) -> None:
+        """Export the current job as a PDF report."""
+        if self._job is None:
+            self._show_status("Open a job before exporting reports.")
+            return
+        try:
+            output_path = export_pdf(self._job, file_path)
+        except (OSError, UnitConversionError) as exc:
+            LOGGER.exception("Could not export PDF report to %s", file_path)
+            QMessageBox.critical(self, "Export PDF Report", str(exc))
+            return
+        self._show_status(f"Exported PDF report: {output_path.name}.")
+
     def fit_to_window(self) -> None:
         """Fit the current page to the viewport."""
         self._viewport.fit_to_window()
@@ -146,6 +186,7 @@ class MainWindow(QMainWindow):
         view_menu = menu_bar.addMenu("&View")
         tools_menu = menu_bar.addMenu("&Tools")
         estimate_menu = menu_bar.addMenu("&Estimate")
+        reports_menu = menu_bar.addMenu("&Reports")
         if not isinstance(file_menu, QMenu):
             msg = "Could not create the file menu."
             raise TypeError(msg)
@@ -160,6 +201,9 @@ class MainWindow(QMainWindow):
             raise TypeError(msg)
         if not isinstance(estimate_menu, QMenu):
             msg = "Could not create the estimate menu."
+            raise TypeError(msg)
+        if not isinstance(reports_menu, QMenu):
+            msg = "Could not create the reports menu."
             raise TypeError(msg)
 
         new_action = QAction("&New Blank Job", self)
@@ -245,6 +289,18 @@ class MainWindow(QMainWindow):
         attach_assembly_action.triggered.connect(self._attach_first_assembly)
         estimate_menu.addAction(attach_assembly_action)
 
+        export_csv_action = QAction("Export &CSV...", self)
+        export_csv_action.triggered.connect(self._choose_csv_report)
+        reports_menu.addAction(export_csv_action)
+
+        export_xlsx_action = QAction("Export &XLSX...", self)
+        export_xlsx_action.triggered.connect(self._choose_xlsx_report)
+        reports_menu.addAction(export_xlsx_action)
+
+        export_pdf_action = QAction("Export &PDF...", self)
+        export_pdf_action.triggered.connect(self._choose_pdf_report)
+        reports_menu.addAction(export_pdf_action)
+
     def attach_estimate_to_section(
         self,
         section_id: str,
@@ -270,6 +326,26 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Save Native Job Folder")
         if folder:
             self.save_job_folder(folder)
+
+    def _choose_csv_report(self) -> None:
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export CSV Report", "", "CSV (*.csv)")
+        if file_path:
+            self.export_csv_report(_path_with_suffix(file_path, ".csv"))
+
+    def _choose_xlsx_report(self) -> None:
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export XLSX Report",
+            "",
+            "Excel Workbook (*.xlsx)",
+        )
+        if file_path:
+            self.export_xlsx_report(_path_with_suffix(file_path, ".xlsx"))
+
+    def _choose_pdf_report(self) -> None:
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export PDF Report", "", "PDF (*.pdf)")
+        if file_path:
+            self.export_pdf_report(_path_with_suffix(file_path, ".pdf"))
 
     def _set_job(self, job: Job) -> None:
         self._job = job
@@ -490,3 +566,10 @@ class MainWindow(QMainWindow):
                     ],
                 )
             ]
+
+
+def _path_with_suffix(file_path: str | Path, suffix: str) -> Path:
+    path = Path(file_path)
+    if path.suffix:
+        return path
+    return path.with_suffix(suffix)

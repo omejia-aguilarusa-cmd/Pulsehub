@@ -55,3 +55,14 @@ Estimating is implemented in `takeoff_pro.estimate`:
 - `pricing` owns unit conversion and BOM math.
 
 Native jobs store item and assembly libraries directly in `job.json`. A takeoff section attaches to an estimate reference with `estimate_reference_type` and `estimate_reference_id`. Pricing walks each attached section, sums its measurement quantities, converts compatible units, and emits flat BOM lines.
+
+## Phase 5 Reports and Packaging Boundary
+
+Report exports are implemented in `takeoff_pro.reports`:
+
+- `data` builds reusable takeoff summary rows from the validated job model.
+- `csv_report` emits a flat takeoff and cost CSV.
+- `xlsx_report` creates a workbook with Job Summary, Takeoff Detail, and Cost Detail worksheets.
+- `pdf_report` creates a local PDF report with summary, detail, cost tables, and page footer numbering.
+
+The main window owns file-dialog routing only; report formatting and pricing remain outside the UI layer. Packaging is defined by `TakeoffPro.spec`, and `scripts/build_exe.ps1` runs PyInstaller to produce `dist\TakeoffPro.exe`.
