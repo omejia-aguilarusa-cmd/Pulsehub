@@ -22,3 +22,13 @@ The data package now has two layers:
 - `takeoff_pro.data.planswift_importer` reads only `Data.xml` files and resolves optional local page image references without copying image data.
 
 The importer is intentionally tolerant of missing top-level job XML so partial exported or sample folders with page-level XML can still be inspected. Parse errors and malformed digitizer data are logged instead of being silently ignored.
+
+## Phase 2 Viewer Boundary
+
+The viewer is split into rendering and interaction layers:
+
+- `takeoff_pro.render.page_renderer` uses PyMuPDF to render PDF and TIFF pages into detached `QImage` instances.
+- `takeoff_pro.ui.viewport.PageViewport` owns the `QGraphicsView` scene, zooming, panning, fit-to-window, actual-size, and viewport rotation behavior.
+- `takeoff_pro.ui.main_window.MainWindow` owns job-folder opening, the page list, and page-to-viewport wiring.
+
+The renderer returns Qt images rather than scene items so rendering can be tested independently from main-window behavior.
