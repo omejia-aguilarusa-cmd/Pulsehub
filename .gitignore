@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+ENV/
+
+# Tooling
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.hypothesis/
+
+# Builds
+build/
+dist/
+*.egg-info/
+
+# Editor and OS files
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
+
+# Real or generated project data
+*.tiff
+*.tif
+*.pdf
+*.tkjob/
+samples/real/
+**/samples/real/
+
+# Local legacy reference jobs
+Sample Plan/
+1 Pineland/
+**/Sample Plan/
+**/1 Pineland/
+
+# Closed-source or generated binaries
+*.dll
+*.exe
+*.psl
+xsandbox.bin
