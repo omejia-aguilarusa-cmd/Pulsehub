@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Page" Name="A101 Floor Plan" GUID="{21000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">A101 Floor Plan</Property>
+    <Property Class="Type" GUID="{21000000-0000-0000-0000-000000000002}" Name="Type">.TIFF Page</Property>
+    <Property Class="Number" GUID="{21000000-0000-0000-0000-000000000003}" Name="OrderIndex">0</Property>
+    <Property Class="Large Image" GUID="{21000000-0000-0000-0000-000000000004}" Name="Image" ImageType="TTiffGraphic"/>
+    <Property Class="Number" GUID="{21000000-0000-0000-0000-000000000005}" Name="ScaleX">24</Property>
+    <Property Class="Number" GUID="{21000000-0000-0000-0000-000000000006}" Name="ScaleY">24</Property>
+    <Property Class="Text" GUID="{21000000-0000-0000-0000-000000000007}" Name="Scale Units">FT</Property>
+    <Property Class="Text" GUID="{21000000-0000-0000-0000-000000000008}" Name="MeasurementType">English</Property>
+  </Properties>
+</Item>

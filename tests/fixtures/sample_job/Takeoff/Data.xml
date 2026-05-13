@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Folder" Name="Takeoff" GUID="{30000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Takeoff</Property>
+    <Property Class="Type" GUID="{30000000-0000-0000-0000-000000000002}" Name="Type">Folder</Property>
+    <Property Class="Number" GUID="{30000000-0000-0000-0000-000000000003}" Name="OrderIndex">1</Property>
+  </Properties>
+</Item>

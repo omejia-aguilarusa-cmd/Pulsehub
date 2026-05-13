@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Count" Name="Fixture Count" GUID="{33000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Fixture Count</Property>
+    <Property Class="Type" GUID="{33000000-0000-0000-0000-000000000002}" Name="Type">Count</Property>
+    <Property Class="Number" GUID="{33000000-0000-0000-0000-000000000003}" Name="OrderIndex">2</Property>
+  </Properties>
+</Item>

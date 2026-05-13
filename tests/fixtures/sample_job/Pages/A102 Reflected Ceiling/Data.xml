@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Page" Name="A102 Reflected Ceiling" GUID="{22000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">A102 Reflected Ceiling</Property>
+    <Property Class="Type" GUID="{22000000-0000-0000-0000-000000000002}" Name="Type">.TIFF Page</Property>
+    <Property Class="Number" GUID="{22000000-0000-0000-0000-000000000003}" Name="OrderIndex">1</Property>
+    <Property Class="Large Image" GUID="{22000000-0000-0000-0000-000000000004}" Name="Image" ImageType="TTiffGraphic"/>
+  </Properties>
+</Item>

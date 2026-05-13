@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Segment" Name="Wall Length" GUID="{31000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Wall Length</Property>
+    <Property Class="Type" GUID="{31000000-0000-0000-0000-000000000002}" Name="Type">Segment</Property>
+    <Property Class="Number" GUID="{31000000-0000-0000-0000-000000000003}" Name="OrderIndex">0</Property>
+    <Property Class="Text" GUID="{31000000-0000-0000-0000-000000000004}" Name="Description">Interior wall run</Property>
+    <Property Class="Text" GUID="{31000000-0000-0000-0000-000000000005}" Name="Scale Units">FT</Property>
+  </Properties>
+</Item>

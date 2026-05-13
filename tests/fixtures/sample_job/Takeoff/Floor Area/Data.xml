@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Area" Name="Floor Area" GUID="{32000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Floor Area</Property>
+    <Property Class="Type" GUID="{32000000-0000-0000-0000-000000000002}" Name="Type">Area</Property>
+    <Property Class="Number" GUID="{32000000-0000-0000-0000-000000000003}" Name="OrderIndex">1</Property>
+    <Property Class="Text" GUID="{32000000-0000-0000-0000-000000000004}" Name="Scale Units">FT</Property>
+  </Properties>
+</Item>
