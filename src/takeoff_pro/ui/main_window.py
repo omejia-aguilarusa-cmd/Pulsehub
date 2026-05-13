@@ -33,8 +33,11 @@ from takeoff_pro.data import (
 )
 from takeoff_pro.data.models import Measurement, MeasurementKind, Point, TakeoffSection
 from takeoff_pro.data.planswift_importer import LegacyImportError
+from takeoff_pro.estimate import Assembly, AssemblyComponent, EstimateItem
+from takeoff_pro.estimate.pricing import UnitConversionError, price_job
 from takeoff_pro.render import PageRenderError, render_page_to_image
 from takeoff_pro.ui.commands import AddMeasurementCommand
+from takeoff_pro.ui.estimate_dialog import EstimateEditorDialog
 from takeoff_pro.ui.scale_dialog import ScaleCalibrationDialog
 from takeoff_pro.ui.viewport import PageViewport
 
@@ -142,6 +145,7 @@ class MainWindow(QMainWindow):
         edit_menu = menu_bar.addMenu("&Edit")
         view_menu = menu_bar.addMenu("&View")
         tools_menu = menu_bar.addMenu("&Tools")
+        estimate_menu = menu_bar.addMenu("&Estimate")
         if not isinstance(file_menu, QMenu):
             msg = "Could not create the file menu."
             raise TypeError(msg)
@@ -153,6 +157,9 @@ class MainWindow(QMainWindow):
             raise TypeError(msg)
         if not isinstance(tools_menu, QMenu):
             msg = "Could not create main window menus."
+            raise TypeError(msg)
+        if not isinstance(estimate_menu, QMenu):
+            msg = "Could not create the estimate menu."
             raise TypeError(msg)
 
         new_action = QAction("&New Blank Job", self)
@@ -225,6 +232,34 @@ class MainWindow(QMainWindow):
             toolbar.addAction(action)
             tools_menu.addAction(action)
         toolbar.addAction(scale_action)
+
+        edit_library_action = QAction("&Items and Assemblies...", self)
+        edit_library_action.triggered.connect(self._edit_estimate_library)
+        estimate_menu.addAction(edit_library_action)
+
+        attach_item_action = QAction("Attach First &Item", self)
+        attach_item_action.triggered.connect(self._attach_first_item)
+        estimate_menu.addAction(attach_item_action)
+
+        attach_assembly_action = QAction("Attach First &Assembly", self)
+        attach_assembly_action.triggered.connect(self._attach_first_assembly)
+        estimate_menu.addAction(attach_assembly_action)
+
+    def attach_estimate_to_section(
+        self,
+        section_id: str,
+        reference_type: str,
+        reference_id: str,
+    ) -> None:
+        """Attach an item or assembly reference to a takeoff section."""
+        if self._job is None:
+            return
+        for section in self._job.takeoff_sections:
+            if section.id == section_id:
+                section.estimate_reference_type = reference_type
+                section.estimate_reference_id = reference_id
+                self._refresh_measurement_panel()
+                return
 
     def _choose_job_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open Job Folder")
@@ -358,8 +393,20 @@ class MainWindow(QMainWindow):
             return
         for section in self._job.takeoff_sections:
             self._measurement_list.addItem(f"{section.name} ({section.kind.value})")
+            if section.estimate_reference_type and section.estimate_reference_id:
+                self._measurement_list.addItem(
+                    f"  Estimate: {section.estimate_reference_type} {section.estimate_reference_id}"
+                )
             for measurement in section.measurements:
                 self._measurement_list.addItem(f"  {self._format_measurement(measurement)}")
+        try:
+            bom_lines = price_job(self._job)
+        except UnitConversionError as exc:
+            self._measurement_list.addItem(f"Estimate error: {exc}")
+            return
+        if bom_lines:
+            total = sum(line.total_cost for line in bom_lines)
+            self._measurement_list.addItem(f"Estimated Total: ${total:.2f}")
 
     def _refresh_current_page_overlays(self) -> None:
         self._viewport.show_measurements(self._measurements_for_current_page())
@@ -388,3 +435,58 @@ class MainWindow(QMainWindow):
         status_bar = self.statusBar()
         if status_bar is not None:
             status_bar.showMessage(message)
+
+    def _edit_estimate_library(self) -> None:
+        if self._job is None:
+            self._show_status("Open a job before editing estimates.")
+            return
+        self._ensure_default_estimate_library()
+        dialog = EstimateEditorDialog(self._job.items, self._job.assemblies, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self._job.items = dialog.items()
+            self._job.assemblies = dialog.assemblies()
+            self._refresh_measurement_panel()
+
+    def _attach_first_item(self) -> None:
+        if self._job is None or not self._job.takeoff_sections:
+            return
+        self._ensure_default_estimate_library()
+        if self._job.items:
+            self.attach_estimate_to_section(
+                self._job.takeoff_sections[0].id,
+                "item",
+                self._job.items[0].item_id,
+            )
+
+    def _attach_first_assembly(self) -> None:
+        if self._job is None or not self._job.takeoff_sections:
+            return
+        self._ensure_default_estimate_library()
+        if self._job.assemblies:
+            self.attach_estimate_to_section(
+                self._job.takeoff_sections[0].id,
+                "assembly",
+                self._job.assemblies[0].assembly_id,
+            )
+
+    def _ensure_default_estimate_library(self) -> None:
+        if self._job is None:
+            return
+        if not self._job.items:
+            self._job.items = [
+                EstimateItem(item_id="PAINT", description="Paint", unit="GAL", unit_cost=35.0),
+                EstimateItem(item_id="LABOR", description="Labor", unit="HR", unit_cost=65.0),
+                EstimateItem(item_id="WALL", description="Wall material", unit="LF", unit_cost=4.5),
+            ]
+        if not self._job.assemblies:
+            self._job.assemblies = [
+                Assembly(
+                    assembly_id="PAINTED-WALL",
+                    name="Painted wall",
+                    takeoff_unit="SF",
+                    components=[
+                        AssemblyComponent(item_id="PAINT", quantity_per_takeoff_unit=0.04),
+                        AssemblyComponent(item_id="LABOR", quantity_per_takeoff_unit=0.02),
+                    ],
+                )
+            ]
