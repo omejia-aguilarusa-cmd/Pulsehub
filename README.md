@@ -4,7 +4,7 @@ Takeoff Pro is a local desktop construction takeoff and estimating tool built wi
 
 ## Status
 
-Phase 0 scaffolding is complete when the local quality gates pass. Import, viewer, takeoff, estimating, and reporting features are planned for later phases.
+Phases 0 through 5 are implemented locally: toolchain, legacy XML import, page viewer, takeoff tools, estimating, report exports, and Windows executable packaging.
 
 ## Prerequisites
 
@@ -50,6 +50,8 @@ Build the Windows executable:
 powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 ```
 
+The packaged app is written to `dist\TakeoffPro.exe`.
+
 ## Development
 
 Run the package entry point directly:
@@ -71,10 +73,10 @@ Create a private GitHub repository first. Then run:
 ```powershell
 git remote add origin <PRIVATE_REPO_URL>
 git push -u origin main
-git push -u origin phase-0-scaffold
+git push --tags
 ```
 
-Open a pull request from `phase-0-scaffold` into `main` for Phase 0 review. Do not push client data or generated build artifacts.
+Do not push client data or generated build artifacts.
 
 ## Data Safety
 

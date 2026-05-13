@@ -8,20 +8,17 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 if ($Clean) {
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$RepoRoot\build"
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$RepoRoot\dist"
+    foreach ($Path in @("$RepoRoot\build", "$RepoRoot\dist")) {
+        $ResolvedParent = Resolve-Path -LiteralPath (Split-Path -Parent $Path)
+        if (-not $Path.StartsWith($ResolvedParent.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean unexpected path: $Path"
+        }
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
-uv run pyinstaller `
-    --noconfirm `
-    --clean `
-    --name TakeoffPro `
-    --onefile `
-    --windowed `
-    --specpath build `
-    --workpath build `
-    --distpath dist `
-    --collect-all pymupdf `
-    --collect-data reportlab `
-    --hidden-import PyQt6.sip `
-    src\takeoff_pro\__main__.py
+uv run pyinstaller --noconfirm --clean .\TakeoffPro.spec
+
+if (-not (Test-Path -LiteralPath "$RepoRoot\dist\TakeoffPro.exe")) {
+    throw "PyInstaller did not create dist\TakeoffPro.exe"
+}

@@ -42,3 +42,13 @@ Use `File > Save As Native Job...` to save the current job as a `.tkjob` folder.
 Use `Estimate > Items and Assemblies...` to edit the job's estimating library. Items have an ID, description, unit, and unit cost. Assemblies bundle one or more items per unit of takeoff.
 
 Use `Estimate > Attach First Item` or `Estimate > Attach First Assembly` to attach the first library entry to the first takeoff section. The measurements panel shows the estimated total when attached sections can be priced.
+
+## Export Reports
+
+Use the `Reports` menu to export the current job:
+
+- `Reports > Export CSV...` writes a flat takeoff and cost file.
+- `Reports > Export XLSX...` writes a workbook with summary, takeoff detail, and cost detail tabs.
+- `Reports > Export PDF...` writes a printable report with summary and detail tables.
+
+Reports use the same attached item and assembly pricing shown in the measurements panel.
