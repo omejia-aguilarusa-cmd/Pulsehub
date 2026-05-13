@@ -39,8 +39,16 @@ samples/real/
 # Local legacy reference jobs
 Sample Plan/
 1 Pineland/
+1215 Crawl/
+180 Wingo Way/
 **/Sample Plan/
 **/1 Pineland/
+**/1215 Crawl/
+**/180 Wingo Way/
+Planswift/
+PlanSwift 9/
+**/Planswift/
+**/PlanSwift 9/
 
 # Closed-source or generated binaries
 *.dll

@@ -13,3 +13,12 @@ Takeoff Pro is a local PyQt application with separate packages for UI, rendering
 - `takeoff_pro.reports` will own CSV, XLSX, and PDF export.
 
 The runtime app must remain fully local and must not make network calls.
+
+## Phase 1 Import Boundary
+
+The data package now has two layers:
+
+- `takeoff_pro.data.models` defines validated Pydantic models for jobs, pages, takeoff sections, measurements, autolists, and raw legacy properties.
+- `takeoff_pro.data.planswift_importer` reads only `Data.xml` files and resolves optional local page image references without copying image data.
+
+The importer is intentionally tolerant of missing top-level job XML so partial exported or sample folders with page-level XML can still be inspected. Parse errors and malformed digitizer data are logged instead of being silently ignored.

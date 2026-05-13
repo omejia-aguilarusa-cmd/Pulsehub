@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Item" Name="Synthetic Training Job" GUID="{10000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Synthetic Training Job</Property>
+    <Property Class="Type" GUID="{10000000-0000-0000-0000-000000000002}" Name="Type">Job</Property>
+    <Property Class="Text" GUID="{10000000-0000-0000-0000-000000000003}" Name="Description">Synthetic fixture for importer tests</Property>
+    <Property Class="Text" GUID="{10000000-0000-0000-0000-000000000004}" Name="Measurement Type">English</Property>
+  </Properties>
+</Item>

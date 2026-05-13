@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Folder" Name="Pages" GUID="{20000000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Pages</Property>
+    <Property Class="Type" GUID="{20000000-0000-0000-0000-000000000002}" Name="Type">Folder</Property>
+    <Property Class="Number" GUID="{20000000-0000-0000-0000-000000000003}" Name="OrderIndex">0</Property>
+  </Properties>
+</Item>

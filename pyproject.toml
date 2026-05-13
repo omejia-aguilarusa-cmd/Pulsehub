@@ -23,6 +23,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "lxml-stubs==0.5.1",
     "mypy==1.15.0",
     "pre-commit==4.1.0",
     "pyinstaller==6.12.0",

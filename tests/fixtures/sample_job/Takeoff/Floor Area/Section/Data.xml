@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Item Class="Area Section" Name="Section" GUID="{32100000-0000-0000-0000-000000000001}">
+  <Properties>
+    <Property Class="Text" GUID="" Name="Name">Section</Property>
+    <Property Class="Type" GUID="{32100000-0000-0000-0000-000000000002}" Name="Type">Area Section</Property>
+    <Property Class="Text" GUID="{32100000-0000-0000-0000-000000000003}" Name="PageGUID">{21000000-0000-0000-0000-000000000001}</Property>
+    <Property Class="Number" GUID="{32100000-0000-0000-0000-000000000004}" Name="OrderIndex">0</Property>
+    <Property Class="Text" GUID="{32100000-0000-0000-0000-000000000005}" Name="DigitizerData">&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;&lt;Points&gt;&lt;Point X=&quot;0&quot; Y=&quot;0&quot; PointType=&quot;Normal&quot;/&gt;&lt;Point X=&quot;100&quot; Y=&quot;0&quot; PointType=&quot;Normal&quot;/&gt;&lt;Point X=&quot;100&quot; Y=&quot;50&quot; PointType=&quot;Normal&quot;/&gt;&lt;Point X=&quot;0&quot; Y=&quot;50&quot; PointType=&quot;Normal&quot;/&gt;&lt;/Points&gt;</Property>
+  </Properties>
+</Item>
