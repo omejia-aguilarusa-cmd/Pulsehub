@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "takeoff-pro"
+version = "0.1.0"
+description = "Local desktop construction takeoff and estimating tool."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Takeoff Pro Contributors" }]
+dependencies = [
+    "PyQt6==6.8.1",
+    "Pillow==11.1.0",
+    "lxml==5.3.1",
+    "openpyxl==3.1.5",
+    "pydantic==2.10.6",
+    "pymupdf==1.25.3",
+    "reportlab==4.3.1",
+    "shapely==2.0.7",
+]
+
+[dependency-groups]
+dev = [
+    "mypy==1.15.0",
+    "pre-commit==4.1.0",
+    "pyinstaller==6.12.0",
+    "pytest==8.3.4",
+    "pytest-cov==6.0.0",
+    "pytest-qt==4.4.0",
+    "ruff==0.9.7",
+]
+
+[project.scripts]
+takeoff-pro = "takeoff_pro.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/takeoff_pro"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "ANN",
+    "B",
+    "D",
+    "E",
+    "F",
+    "I",
+    "LOG",
+    "N",
+    "RUF",
+    "TRY",
+    "UP",
+]
+ignore = [
+    "D203",
+    "D213",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D100", "D103", "S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+show_error_codes = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["takeoff_pro"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true
+skip_covered = true
