@@ -52,6 +52,8 @@ class Measurement(BaseModel):
     z_order: int | None = None
     visible: bool = True
     points: list[Point] = Field(default_factory=list)
+    quantity: float | None = None
+    unit: str | None = None
     source_xml_path: Path | None = None
     raw_properties: dict[str, LegacyProperty] = Field(default_factory=dict)
 
@@ -86,6 +88,10 @@ class Page(BaseModel):
     scale_x: float | None = None
     scale_y: float | None = None
     scale_units: str | None = None
+    scale_pixels_per_unit: float | None = None
+    scale_unit: str | None = None
+    canvas_width: int = 1600
+    canvas_height: int = 1000
     measurement_type: str | None = None
     source_xml_path: Path | None = None
     raw_properties: dict[str, LegacyProperty] = Field(default_factory=dict)
@@ -108,6 +114,7 @@ class Job(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    native_format_version: int = 1
     id: str
     name: str
     measurement_system: str | None = None

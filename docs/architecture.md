@@ -32,3 +32,16 @@ The viewer is split into rendering and interaction layers:
 - `takeoff_pro.ui.main_window.MainWindow` owns job-folder opening, the page list, and page-to-viewport wiring.
 
 The renderer returns Qt images rather than scene items so rendering can be tested independently from main-window behavior.
+
+## Phase 3 Native Takeoff Boundary
+
+Native project persistence uses `.tkjob` folders with a `job.json` file containing the Pydantic `Job` model. Page image paths remain references; image files are not copied into the save folder yet.
+
+The takeoff UI is split this way:
+
+- `takeoff_pro.core.geometry` calculates length, area, perimeter, and count quantities from page-space points and page scale.
+- `takeoff_pro.ui.viewport.PageViewport` collects drawing points and renders overlays.
+- `takeoff_pro.ui.commands` wraps measurement edits in `QUndoCommand` objects.
+- `takeoff_pro.ui.main_window.MainWindow` owns the active job, current page, tool selection, scale calibration, and measurements panel.
+
+Scale calibration stores `scale_pixels_per_unit` and `scale_unit` on each page. Imported legacy `ScaleX` values remain available as a fallback when no native calibration is present.
