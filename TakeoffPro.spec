@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 
 project_root = Path.cwd()
@@ -18,7 +18,6 @@ for package_name in ("pymupdf",):
     hiddenimports += package_hiddenimports
 
 datas += collect_data_files("reportlab")
-hiddenimports += collect_submodules("reportlab")
 
 a = Analysis(
     [str(project_root / "src" / "takeoff_pro" / "__main__.py")],
