@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeGuard
 from uuid import uuid4
@@ -125,11 +126,37 @@ class _PageLike(Protocol):
         """Return a grayscale page pixmap."""
 
 
-def review_job_drawings(job: Job, *, max_measurements_per_page: int = 12) -> DrawingReview:
-    """Analyze local drawings and return automated measurement suggestions."""
+def review_job_drawings(
+    job: Job,
+    *,
+    max_measurements_per_page: int = 12,
+    progress_callback: Callable[[str], None] | None = None,
+) -> DrawingReview:
+    """Analyze local drawings and return automated measurement suggestions.
+
+    progress_callback receives a status string after each page is processed.
+    Per-page exceptions are caught and reported as notes rather than aborting
+    the entire review.
+    """
     page_reviews: list[PageReview] = []
-    for page in job.pages:
-        page_reviews.append(_review_page(page, max_measurements_per_page=max_measurements_per_page))
+    n = len(job.pages)
+    for i, page in enumerate(job.pages):
+        if progress_callback is not None:
+            progress_callback(f"Analyzing {page.name} ({i + 1}/{n})…")
+        try:
+            page_reviews.append(
+                _review_page(page, max_measurements_per_page=max_measurements_per_page)
+            )
+        except Exception as exc:
+            LOGGER.exception("Error reviewing page %s", page.name)
+            page_reviews.append(
+                PageReview(
+                    page_id=page.id,
+                    detected_scale=None,
+                    measurements=(),
+                    notes=(f"Review failed: {exc}",),
+                )
+            )
     return DrawingReview(pages=tuple(page_reviews))
 
 

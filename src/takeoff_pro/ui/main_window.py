@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PyQt6.QtCore import QMimeData, QSize, Qt, QTimer
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QKeySequence, QUndoStack
+from PyQt6.QtGui import QAction, QColor, QDragEnterEvent, QDropEvent, QKeySequence, QImage, QUndoStack
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -31,10 +31,10 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtCore import QThread, pyqtSignal
 
 from takeoff_pro.analysis import DrawingReview, apply_drawing_review, review_job_drawings
 from takeoff_pro.core import calculate_measurement
@@ -83,6 +83,48 @@ _RISK_BG   = "#fef2f2"
 _INFO      = "#2563eb"
 _INFO_BG   = "#eff6ff"
 
+# Common architectural scale presets: label → (drawing_inches, real_feet)
+_SCALE_PRESETS: list[tuple[str, float, float]] = [
+    ('3" = 1\'',    3.0,  1.0),
+    ('1½" = 1\'',  1.5,  1.0),
+    ('1" = 1\'',    1.0,  1.0),
+    ('¾" = 1\'',   0.75, 1.0),
+    ('½" = 1\'',   0.5,  1.0),
+    ('⅜" = 1\'',  0.375, 1.0),
+    ('¼" = 1\'',   0.25, 1.0),
+    ('³⁄₁₆" = 1\'', 0.1875, 1.0),
+    ('⅛" = 1\'',  0.125, 1.0),
+    ('1/16" = 1\'', 0.0625, 1.0),
+    ('1" = 10\'',   1.0, 10.0),
+    ('1" = 20\'',   1.0, 20.0),
+    ('1" = 30\'',   1.0, 30.0),
+    ('1" = 40\'',   1.0, 40.0),
+    ('1" = 50\'',   1.0, 50.0),
+    ('1" = 100\'',  1.0, 100.0),
+]
+
+
+# ── Background page render worker ─────────────────────────────────────────────
+
+class _PageRenderWorker(QThread):
+    """Renders a single PDF/TIFF page to a QImage on a background thread."""
+
+    rendered = pyqtSignal(str, object)   # (page_id, QImage)
+    failed   = pyqtSignal(str, str)      # (page_id, error_message)
+
+    def __init__(self, page_id: str, image_path: Path, page_index: int) -> None:
+        super().__init__()
+        self._page_id = page_id
+        self._image_path = image_path
+        self._page_index = page_index
+
+    def run(self) -> None:
+        try:
+            image = render_page_to_image(self._image_path, page_index=self._page_index)
+            self.rendered.emit(self._page_id, image)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._page_id, str(exc))
+
 
 # ── Main window ───────────────────────────────────────────────────────────────
 
@@ -103,6 +145,7 @@ class MainWindow(QMainWindow):
         self._last_review: DrawingReview | None = None
         self._undo_stack = QUndoStack(self)
         self._ai_worker: AIAnalysisWorker | None = None
+        self._render_worker: _PageRenderWorker | None = None
 
         # Widgets populated in _build_* helpers
         self._sidebar = QListWidget(self)
@@ -123,6 +166,10 @@ class MainWindow(QMainWindow):
         self._viewport = PageViewport(self)
         self._viewport.set_measurement_created_callback(self._on_measurement_created)
 
+        # Tool button references (populated in _build_takeoff_toolbar)
+        self._tool_btns: dict[MeasurementKind, QPushButton] = {}
+        self._scale_indicator: QLabel | None = None
+
         self._create_workspace()
         self._create_actions()
         self._apply_stylesheet()
@@ -130,6 +177,15 @@ class MainWindow(QMainWindow):
         self._sidebar.currentRowChanged.connect(self._on_workspace_changed)
         self._document_table.cellDoubleClicked.connect(self._open_document_row)
         self._viewport.set_placeholder("Open a job folder or upload drawings to begin.")
+
+        # Viewport keyboard signals
+        self._viewport.tool_activation_requested.connect(self._on_tool_activation_requested)
+        self._viewport.tool_cancelled.connect(self._on_tool_cancelled)
+        self._viewport.measurement_finish_requested.connect(
+            self._viewport.finish_active_measurement
+        )
+        self._viewport.delete_requested.connect(self._delete_last_measurement_on_page)
+
         self._sidebar.setCurrentRow(0)
         self._refresh_workspace()
 
@@ -230,12 +286,33 @@ class MainWindow(QMainWindow):
         if self._current_page is None:
             self._show_status("Open a page before setting scale.")
             return
+        self._sidebar.setCurrentRow(2)
         self._viewport.start_calibration(self._finish_scale_calibration)
-        self._show_status("Click two points to define a known distance.")
+        self._show_status("Click two points on the drawing to define a known distance.")
+
+    def apply_preset_scale(self, drawing_inches: float, real_feet: float) -> None:
+        """Apply a preset architectural scale to the current page."""
+        if self._current_page is None:
+            self._show_status("Open a page before applying a scale preset.")
+            return
+        # 72 PDF points per inch; pixels_per_unit = PDF points per real foot
+        pixels_per_unit = (72.0 * drawing_inches) / real_feet
+        self._current_page.scale_pixels_per_unit = pixels_per_unit
+        self._current_page.scale_unit = "FT"
+        self._current_page.scale_units = "FT"
+        self._current_page.scale_source = "preset"
+        self._recalculate_page_measurements(self._current_page)
+        self._update_scale_indicator()
+        self._refresh_workspace()
+        self._show_status(
+            f"Scale set: {_scale_label_short(pixels_per_unit, 'FT')}"
+        )
 
     def activate_tool(self, kind: MeasurementKind | None) -> None:
         """Activate a takeoff drawing tool."""
         self._viewport.set_active_tool(kind)
+        for k, btn in self._tool_btns.items():
+            btn.setChecked(k == kind)
         self._show_status(f"{kind.value.title()} tool active." if kind else "Tool cleared.")
 
     def attach_estimate_to_section(
@@ -250,6 +327,16 @@ class MainWindow(QMainWindow):
                 section.estimate_reference_id = reference_id
                 self._refresh_measurement_panel()
                 return
+
+    def closeEvent(self, event: object) -> None:  # type: ignore[override]
+        """Clean up background workers before closing."""
+        if self._render_worker is not None:
+            self._render_worker.rendered.disconnect()
+            self._render_worker.failed.disconnect()
+        if self._ai_worker is not None:
+            self._ai_worker.finished.disconnect()
+            self._ai_worker.error.disconnect()
+        super().closeEvent(event)  # type: ignore[arg-type]
 
     # ── Drag-and-drop ─────────────────────────────────────────────────────────
 
@@ -505,6 +592,12 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Inline tool toolbar
+        layout.addWidget(self._build_takeoff_toolbar())
+
+        # Main splitter
         splitter = QSplitter(page)
         splitter.setObjectName("takeoffSplitter")
 
@@ -535,8 +628,77 @@ class MainWindow(QMainWindow):
         splitter.addWidget(meas_panel)
 
         splitter.setSizes([220, 800, 300])
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         return page
+
+    def _build_takeoff_toolbar(self) -> QFrame:
+        """Build the inline tool + scale bar for the Takeoff workspace."""
+        bar = QFrame()
+        bar.setObjectName("takeoffToolBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(4)
+
+        # Mutually exclusive tool buttons
+        for label, kind, tip in (
+            ("Length  L",  MeasurementKind.LENGTH, "Draw polyline length (L)"),
+            ("Area  A",    MeasurementKind.AREA,   "Draw polygon area (A)"),
+            ("Count  C",   MeasurementKind.COUNT,  "Place count point (C)"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("toolBtn")
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda checked, k=kind: self._activate_tool(k, checked))
+            layout.addWidget(btn)
+            self._tool_btns[kind] = btn
+
+        # Finish button
+        finish_btn = QPushButton("Finish  ↵")
+        finish_btn.setObjectName("toolBtn")
+        finish_btn.setToolTip("Finish current measurement (Enter)")
+        finish_btn.clicked.connect(self._viewport.finish_active_measurement)
+        layout.addWidget(finish_btn)
+
+        # Thin vertical separator
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setObjectName("toolBarSep")
+        layout.addWidget(sep1)
+
+        # Scale indicator
+        scale_cap = QLabel("SCALE")
+        scale_cap.setObjectName("scaleCapLabel")
+        layout.addWidget(scale_cap)
+
+        self._scale_indicator = QLabel("—")
+        self._scale_indicator.setObjectName("scaleIndicator")
+        self._scale_indicator.setMinimumWidth(120)
+        layout.addWidget(self._scale_indicator)
+
+        set_scale_btn = QPushButton("Set Scale  S")
+        set_scale_btn.setObjectName("toolBtn")
+        set_scale_btn.setToolTip("Click two points to calibrate scale (S)")
+        set_scale_btn.clicked.connect(self.start_scale_calibration)
+        layout.addWidget(set_scale_btn)
+
+        # Preset scale picker
+        self._preset_btn = QPushButton("Presets ▾")
+        self._preset_btn.setObjectName("toolBtn")
+        self._preset_btn.setToolTip("Apply a standard architectural scale")
+        self._preset_btn.clicked.connect(self._show_scale_presets_menu)
+        layout.addWidget(self._preset_btn)
+
+        layout.addStretch(1)
+
+        # Help button
+        help_btn = QPushButton("?")
+        help_btn.setObjectName("toolBtnHelp")
+        help_btn.setToolTip("Keyboard shortcuts")
+        help_btn.clicked.connect(self._show_keybind_help)
+        layout.addWidget(help_btn)
+
+        return bar
 
     def _build_review_page(self) -> QWidget:
         page = QWidget()
@@ -661,7 +823,7 @@ class MainWindow(QMainWindow):
             hh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             hh.setHighlightSections(False)
 
-    # ── Menu & toolbar ────────────────────────────────────────────────────────
+    # ── Menu & actions ────────────────────────────────────────────────────────
 
     def _create_actions(self) -> None:
         mb = self.menuBar()
@@ -673,9 +835,11 @@ class MainWindow(QMainWindow):
         tools_menu = mb.addMenu("&Tools")
         estimate_menu = mb.addMenu("&Estimate")
         reports_menu = mb.addMenu("&Reports")
+        help_menu = mb.addMenu("&Help")
         if not isinstance(file_menu, QMenu):
             return
 
+        # File
         new_act = QAction("&New Blank Job", self)
         new_act.setShortcut(QKeySequence.StandardKey.New)
         new_act.triggered.connect(self.new_blank_job)
@@ -695,6 +859,7 @@ class MainWindow(QMainWindow):
         save_act.triggered.connect(self._choose_save_folder)
         file_menu.addAction(save_act)
 
+        # Edit
         if isinstance(edit_menu, QMenu):
             undo_act = self._undo_stack.createUndoAction(self, "&Undo")
             if undo_act:
@@ -705,60 +870,79 @@ class MainWindow(QMainWindow):
                 redo_act.setShortcut(QKeySequence.StandardKey.Redo)
                 edit_menu.addAction(redo_act)
 
+            edit_menu.addSeparator()
+
+            del_act = QAction("&Delete Last Measurement", self)
+            del_act.setShortcut(QKeySequence("Delete"))
+            del_act.triggered.connect(self._delete_last_measurement_on_page)
+            edit_menu.addAction(del_act)
+
+        # View
         if isinstance(view_menu, QMenu):
             fit_act = QAction("&Fit to Window", self)
             fit_act.setShortcut(QKeySequence("F"))
             fit_act.triggered.connect(self.fit_to_window)
             view_menu.addAction(fit_act)
+
             actual_act = QAction("&Actual Size", self)
             actual_act.setShortcut(QKeySequence("1"))
             actual_act.triggered.connect(self.actual_size)
             view_menu.addAction(actual_act)
+
             rotate_act = QAction("&Rotate Clockwise", self)
             rotate_act.setShortcut(QKeySequence("R"))
             rotate_act.triggered.connect(self.rotate_clockwise)
             view_menu.addAction(rotate_act)
 
-        scale_act = QAction("&Set Scale", self)
-        scale_act.triggered.connect(self.start_scale_calibration)
+            view_menu.addSeparator()
+
+            zoom_in_act = QAction("Zoom &In", self)
+            zoom_in_act.setShortcut(QKeySequence("="))
+            zoom_in_act.triggered.connect(lambda: self._viewport.zoom_by(1.25))
+            view_menu.addAction(zoom_in_act)
+
+            zoom_out_act = QAction("Zoom &Out", self)
+            zoom_out_act.setShortcut(QKeySequence("-"))
+            zoom_out_act.triggered.connect(lambda: self._viewport.zoom_by(1 / 1.25))
+            view_menu.addAction(zoom_out_act)
+
+        # Tools
         if isinstance(tools_menu, QMenu):
+            scale_act = QAction("&Set Scale (click 2 points)", self)
+            scale_act.setShortcut(QKeySequence("S"))
+            scale_act.triggered.connect(self.start_scale_calibration)
             tools_menu.addAction(scale_act)
 
-        # Toolbar
-        toolbar = QToolBar("Takeoff Tools", self)
-        toolbar.setObjectName("takeoffToolbar")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(14, 14))
-        self.addToolBar(toolbar)
-        toolbar.addAction(new_act)
-        toolbar.addAction(open_act)
-        toolbar.addAction(upload_act)
-        toolbar.addAction(save_act)
-        toolbar.addSeparator()
+            tools_menu.addSeparator()
 
-        tool_group = QActionGroup(self)
-        for label, kind in (
-            ("Length ↗", MeasurementKind.LENGTH),
-            ("Area ▪", MeasurementKind.AREA),
-            ("Count •", MeasurementKind.COUNT),
-        ):
-            act = QAction(label, self)
-            act.setCheckable(True)
-            act.triggered.connect(
-                lambda checked, k=kind: self._activate_tool(k, checked)
-            )
-            tool_group.addAction(act)
-            toolbar.addAction(act)
-            if isinstance(tools_menu, QMenu):
+            for label, kind, shortcut in (
+                ("&Length Tool",  MeasurementKind.LENGTH, "L"),
+                ("&Area Tool",    MeasurementKind.AREA,   "A"),
+                ("&Count Tool",   MeasurementKind.COUNT,  "C"),
+            ):
+                act = QAction(label, self)
+                act.setShortcut(QKeySequence(shortcut))
+                act.triggered.connect(
+                    lambda _checked, k=kind: self._toggle_tool(k)
+                )
                 tools_menu.addAction(act)
-        toolbar.addAction(scale_act)
 
-        finish_act = QAction("Finish", self)
-        finish_act.triggered.connect(self._viewport.finish_active_measurement)
-        toolbar.addAction(finish_act)
-        if isinstance(tools_menu, QMenu):
+            cancel_act = QAction("&Cancel Tool / Clear Pending", self)
+            cancel_act.setShortcut(QKeySequence("Escape"))
+            cancel_act.triggered.connect(self._cancel_active_tool)
+            tools_menu.addAction(cancel_act)
+
+            finish_act = QAction("&Finish Measurement", self)
+            finish_act.setShortcut(QKeySequence("Return"))
+            finish_act.triggered.connect(self._viewport.finish_active_measurement)
             tools_menu.addAction(finish_act)
 
+            tools_menu.addSeparator()
+            run_review_act = QAction("&Run AI Review", self)
+            run_review_act.triggered.connect(self._run_automated_review)
+            tools_menu.addAction(run_review_act)
+
+        # Estimate
         if isinstance(estimate_menu, QMenu):
             edit_lib_act = QAction("&Items and Assemblies…", self)
             edit_lib_act.triggered.connect(self._edit_estimate_library)
@@ -770,6 +954,7 @@ class MainWindow(QMainWindow):
             attach_asm.triggered.connect(self._attach_first_assembly)
             estimate_menu.addAction(attach_asm)
 
+        # Reports
         if isinstance(reports_menu, QMenu):
             for label, callback in (
                 ("Export &CSV…",  self._choose_csv_report),
@@ -779,6 +964,13 @@ class MainWindow(QMainWindow):
                 act = QAction(label, self)
                 act.triggered.connect(callback)
                 reports_menu.addAction(act)
+
+        # Help
+        if isinstance(help_menu, QMenu):
+            keys_act = QAction("&Keyboard Shortcuts…", self)
+            keys_act.setShortcut(QKeySequence("?"))
+            keys_act.triggered.connect(self._show_keybind_help)
+            help_menu.addAction(keys_act)
 
     # ── Stylesheet ────────────────────────────────────────────────────────────
 
@@ -904,6 +1096,57 @@ class MainWindow(QMainWindow):
             }}
             #topBtnPrimary:hover {{ background: #000; }}
 
+            /* ── Takeoff tool bar ──────────────────────────────────── */
+            #takeoffToolBar {{
+                background: {_PANEL};
+                border-bottom: 1px solid {_HAIRLINE};
+            }}
+            #toolBtn {{
+                background: {_SOFT};
+                border: 1px solid {_HAIRLINE2};
+                border-radius: 6px;
+                font-size: 12px;
+                color: {_INK2};
+                height: 28px;
+                padding: 0 10px;
+            }}
+            #toolBtn:hover {{ background: rgba(15,15,18,0.07); color: {_INK1}; }}
+            #toolBtn:checked {{
+                background: {_INK1};
+                color: white;
+                border-color: {_INK1};
+            }}
+            #toolBtnHelp {{
+                background: {_SOFT};
+                border: 1px solid {_HAIRLINE2};
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 700;
+                color: {_INK3};
+                height: 28px;
+                width: 28px;
+                padding: 0;
+            }}
+            #toolBtnHelp:hover {{ color: {_INK1}; background: rgba(15,15,18,0.07); }}
+            #toolBarSep {{
+                background: {_HAIRLINE2};
+                max-width: 1px;
+                margin: 4px 6px;
+            }}
+            #scaleCapLabel {{
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.07em;
+                color: {_INK4};
+                text-transform: uppercase;
+            }}
+            #scaleIndicator {{
+                font-size: 12.5px;
+                font-weight: 500;
+                color: {_INK1};
+                padding: 0 6px;
+            }}
+
             /* ── Metric cards ──────────────────────────────────────── */
             #metricCard {{
                 background: {_PANEL};
@@ -1024,27 +1267,6 @@ class MainWindow(QMainWindow):
             }}
             #pageViewport {{ background: {_BG}; border: 0; }}
 
-            /* ── Toolbar ───────────────────────────────────────────── */
-            QToolBar {{
-                background: {_PANEL};
-                border-bottom: 1px solid {_HAIRLINE};
-                spacing: 4px;
-                padding: 4px 8px;
-            }}
-            QToolBar QToolButton {{
-                background: transparent;
-                border: 1px solid transparent;
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-size: 12px;
-                color: {_INK2};
-            }}
-            QToolBar QToolButton:hover {{ background: {_SOFT}; }}
-            QToolBar QToolButton:checked {{
-                background: {_INK1};
-                color: white;
-            }}
-
             /* ── Status bar ────────────────────────────────────────── */
             QStatusBar {{ background: {_SOFT}; color: {_INK3}; font-size: 11.5px; }}
 
@@ -1143,7 +1365,6 @@ class MainWindow(QMainWindow):
             self.export_pdf_report(_path_with_suffix(path, ".pdf"))
 
     def _quick_export(self) -> None:
-        """Export to XLSX — fast one-click export from the top bar."""
         if self._job is None:
             self._show_status("Open a job before exporting.")
             return
@@ -1193,11 +1414,15 @@ class MainWindow(QMainWindow):
                 f"{review.measurement_count} suggested · {added} applied"
             )
         self._ai_worker = None
+        # Update scale indicator if auto-scale was detected
+        self._update_scale_indicator()
 
     def _on_review_error(self, message: str) -> None:
         self._ai_progress.hide()
         self._ai_status_label.hide()
         QMessageBox.critical(self, "AI Review Error", message)
+        if hasattr(self, "_review_progress_label"):
+            self._review_progress_label.setText("Error — see message above.")
         self._ai_worker = None
 
     # ── Job state ─────────────────────────────────────────────────────────────
@@ -1216,8 +1441,9 @@ class MainWindow(QMainWindow):
             self._page_list.addItem(item)
         self._refresh_measurement_panel()
         self._show_status(f"Opened '{job.name}' · {len(job.pages)} page(s).")
+        self._update_scale_indicator()
         if job.pages:
-            self._page_list.setCurrentRow(0)  # triggers _load_page which updates status
+            self._page_list.setCurrentRow(0)
         else:
             self._viewport.set_placeholder("No pages found in this job folder.")
         self._refresh_workspace()
@@ -1239,26 +1465,85 @@ class MainWindow(QMainWindow):
     def _load_page(self, page: Page) -> None:
         self._current_page = page
         self._viewport.set_current_page_id(page.id)
+        # Update status and scale indicator immediately (synchronous) so tests pass.
+        self._show_status(page.name)
+        self._update_scale_indicator()
+
         if page.image_path is None:
             self._viewport.set_blank_page(page.canvas_width, page.canvas_height)
             self._refresh_current_page_overlays()
-            self._show_status(page.name)
             return
-        try:
-            image = render_page_to_image(page.image_path, page_index=page.source_page_index)
-        except PageRenderError as exc:
-            LOGGER.exception("Could not render page %s", page.image_path)
-            self._viewport.set_placeholder("Page image could not be rendered.")
-            self._show_status(f"{page.name}: {exc}")
+
+        # Show a lightweight placeholder while the render runs in the background.
+        self._viewport.set_placeholder(f"Loading {page.name}…")
+        self._refresh_current_page_overlays()
+        self._start_page_render(page)
+
+    def _start_page_render(self, page: Page) -> None:
+        """Kick off a background render for page, discarding any previous render."""
+        if self._render_worker is not None:
+            try:
+                self._render_worker.rendered.disconnect()
+                self._render_worker.failed.disconnect()
+            except RuntimeError:
+                pass
+
+        if page.image_path is None:
+            return
+
+        worker = _PageRenderWorker(page.id, page.image_path, page.source_page_index)
+        worker.rendered.connect(self._on_page_rendered)
+        worker.failed.connect(self._on_page_render_failed)
+        self._render_worker = worker
+        worker.start()
+
+    def _on_page_rendered(self, page_id: str, image: object) -> None:
+        """Handle a successfully rendered page image."""
+        if self._current_page is None or self._current_page.id != page_id:
+            return  # Page changed while rendering — discard stale result.
+        if not isinstance(image, QImage):
             return
         self._viewport.set_image(image)
         self._refresh_current_page_overlays()
-        self._show_status(page.name)
+        self._render_worker = None
+
+    def _on_page_render_failed(self, page_id: str, message: str) -> None:
+        """Handle a failed page render."""
+        if self._current_page is None or self._current_page.id != page_id:
+            return
+        self._viewport.set_placeholder("Page image could not be rendered.")
+        self._show_status(f"Render error: {message}")
+        LOGGER.error("Page render failed for %s: %s", page_id, message)
+        self._render_worker = None
 
     # ── Tools ─────────────────────────────────────────────────────────────────
 
     def _activate_tool(self, kind: MeasurementKind, checked: bool) -> None:
         self.activate_tool(kind if checked else None)
+
+    def _toggle_tool(self, kind: MeasurementKind) -> None:
+        """Toggle a tool on if it was off, or off if it was already active."""
+        current = self._viewport._active_tool
+        new_kind = None if current == kind else kind
+        self.activate_tool(new_kind)
+
+    def _cancel_active_tool(self) -> None:
+        """Cancel current tool and clear any pending measurement points."""
+        self._viewport.set_active_tool(None)
+        for btn in self._tool_btns.values():
+            btn.setChecked(False)
+        self._show_status("Tool cancelled.")
+
+    def _on_tool_activation_requested(self, kind: object) -> None:
+        """Handle L/A/C shortcut keys from the viewport."""
+        if isinstance(kind, MeasurementKind):
+            self._toggle_tool(kind)
+
+    def _on_tool_cancelled(self) -> None:
+        """Sync button states when the viewport cancels via Escape."""
+        for btn in self._tool_btns.values():
+            btn.setChecked(False)
+        self._show_status("Tool cancelled.")
 
     def _on_measurement_created(self, measurement: Measurement) -> None:
         if self._job is None or self._current_page is None:
@@ -1307,15 +1592,102 @@ class MainWindow(QMainWindow):
         self._current_page.scale_units = dialog.unit()
         self._current_page.scale_source = "manual"
         self._recalculate_page_measurements(self._current_page)
+        self._update_scale_indicator()
         self._refresh_workspace()
         self._show_status(
             f"Scale set: {self._current_page.scale_pixels_per_unit:.4f} px/{dialog.unit()}"
         )
 
+    def _delete_last_measurement_on_page(self) -> None:
+        """Delete the most recently added manual measurement on the current page."""
+        if self._job is None or self._current_page is None:
+            return
+        for section in reversed(self._job.takeoff_sections):
+            for i in range(len(section.measurements) - 1, -1, -1):
+                m = section.measurements[i]
+                if m.page_id == self._current_page.id and m.source == "manual":
+                    del section.measurements[i]
+                    self._on_job_changed()
+                    self._show_status(f"Deleted '{m.name}'.")
+                    return
+        self._show_status("No manual measurements to delete on this page.")
+
     def _on_job_changed(self) -> None:
         self._refresh_measurement_panel()
         self._refresh_current_page_overlays()
         self._refresh_workspace()
+
+    # ── Scale ──────────────────────────────────────────────────────────────────
+
+    def _update_scale_indicator(self) -> None:
+        """Update the scale label in the Takeoff toolbar."""
+        if self._scale_indicator is None:
+            return
+        if self._current_page is None:
+            self._scale_indicator.setText("—")
+            return
+        self._scale_indicator.setText(self._format_page_scale(self._current_page))
+
+    def _show_scale_presets_menu(self) -> None:
+        """Show a popup menu with common architectural scales."""
+        if not hasattr(self, "_preset_btn"):
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for label, drawing_inches, real_feet in _SCALE_PRESETS:
+            act = menu.addAction(label)
+            if act is not None:
+                act.triggered.connect(
+                    lambda _checked, di=drawing_inches, rf=real_feet:
+                    self.apply_preset_scale(di, rf)
+                )
+        menu.exec(self._preset_btn.mapToGlobal(
+            self._preset_btn.rect().bottomLeft()
+        ))
+
+    # ── Keybind help ──────────────────────────────────────────────────────────
+
+    def _show_keybind_help(self) -> None:
+        """Show a dialog listing all keyboard shortcuts."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.setMinimumWidth(340)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+
+        text = QLabel(
+            "<b>Takeoff tools</b><br>"
+            "&nbsp;&nbsp;L — Length tool (polyline)<br>"
+            "&nbsp;&nbsp;A — Area tool (polygon)<br>"
+            "&nbsp;&nbsp;C — Count / point tool<br>"
+            "&nbsp;&nbsp;Esc — Cancel / clear pending points<br>"
+            "&nbsp;&nbsp;Enter — Finish current measurement<br>"
+            "&nbsp;&nbsp;Del — Delete last manual measurement<br>"
+            "<br><b>Scale</b><br>"
+            "&nbsp;&nbsp;S — Start 2-click scale calibration<br>"
+            "<br><b>View</b><br>"
+            "&nbsp;&nbsp;F — Fit drawing to window<br>"
+            "&nbsp;&nbsp;1 — Actual size (100%)<br>"
+            "&nbsp;&nbsp;R — Rotate clockwise 90°<br>"
+            "&nbsp;&nbsp;= / + — Zoom in<br>"
+            "&nbsp;&nbsp;- — Zoom out<br>"
+            "&nbsp;&nbsp;Space + drag — Pan drawing<br>"
+            "&nbsp;&nbsp;Ctrl + scroll — Zoom in / out<br>"
+            "<br><b>Edit</b><br>"
+            "&nbsp;&nbsp;Ctrl+Z — Undo<br>"
+            "&nbsp;&nbsp;Ctrl+Y — Redo<br>"
+            "<br><b>File</b><br>"
+            "&nbsp;&nbsp;Ctrl+N — New blank job<br>"
+            "&nbsp;&nbsp;Ctrl+O — Open job folder<br>"
+            "&nbsp;&nbsp;Ctrl+S — Save as native job<br>"
+        )
+        text.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     # ── Refresh helpers ───────────────────────────────────────────────────────
 
@@ -1431,7 +1803,6 @@ class MainWindow(QMainWindow):
             page = self._pages_by_id.get(pr.page_id)
             name = page.name if page is not None else pr.page_id
             scale_label = pr.detected_scale.label if pr.detected_scale is not None else "Not detected"
-            scale_source = "auto" if pr.detected_scale is not None else "—"
             values = [
                 name,
                 _scale_label_short(pr.detected_scale.pixels_per_unit, pr.detected_scale.unit)
@@ -1651,4 +2022,16 @@ def _scale_label_short(pixels_per_unit: float, unit: str) -> str:
         real_unit = "ft"
         inv = 1.0 / drawing_inches if drawing_inches > 0 else 0
         return f"1″ = {inv:.2g}′" if inv >= 1 else f"1/{round(1/drawing_inches)}″ = 1′"
+    if unit in {"IN", "INCH", "INCHES"}:
+        return f"{pixels_per_unit:.2f} pt/in"
+    if unit in {"M", "METRE", "METER"}:
+        # pixels_per_unit is PDF points per metre
+        # 1 PDF pt = 25.4/72 mm
+        real_mm_per_pt = 25.4 / 72.0
+        ratio = pixels_per_unit * real_mm_per_pt / 1000.0  # real metres per PDF pt ... wait
+        # pixels_per_unit = PDF_points per real metre
+        # 1 PDF pt = (25.4/72) mm → 1 PDF pt / pixels_per_unit metres
+        # ratio = 1 / (pixels_per_unit × 25.4 / 72 / 1000)
+        ratio = 1000.0 / (pixels_per_unit * 25.4 / 72.0)
+        return f"1:{ratio:.0f}"
     return f"{pixels_per_unit:.2f} pt/{unit}"

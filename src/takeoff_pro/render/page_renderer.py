@@ -8,6 +8,11 @@ from typing import Protocol
 import pymupdf  # type: ignore[import-untyped]
 from PyQt6.QtGui import QImage
 
+# Render at 2× PDF resolution so images stay sharp when the user zooms in.
+# devicePixelRatio is set to the same factor so Qt maps scene coordinates
+# back to 1× PDF-point space (measurement coordinates remain correct).
+_RENDER_QUALITY: float = 2.0
+
 
 class PageRenderError(RuntimeError):
     """Raised when a page cannot be rendered."""
@@ -27,7 +32,12 @@ def render_page_to_image(
     zoom: float = 1.0,
     rotation_degrees: int = 0,
 ) -> QImage:
-    """Render a PDF or TIFF page into a detached Qt image."""
+    """Render a PDF or TIFF page into a detached Qt image.
+
+    The returned image has devicePixelRatio == _RENDER_QUALITY so that scene
+    coordinates inside QGraphicsView remain in PDF-point units even though the
+    physical pixel buffer is _RENDER_QUALITY× larger.
+    """
     path = Path(source_path).expanduser().resolve()
     if not path.exists():
         msg = f"Page file does not exist: {path}"
@@ -50,9 +60,12 @@ def render_page_to_image(
             msg = f"Page index {page_index} is outside 0..{document.page_count - 1}."
             raise PageRenderError(msg)
         page = document.load_page(page_index)
-        matrix = pymupdf.Matrix(zoom, zoom).prerotate(rotation_degrees)
+        render_scale = zoom * _RENDER_QUALITY
+        matrix = pymupdf.Matrix(render_scale, render_scale).prerotate(rotation_degrees)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-        return _pixmap_to_image(pixmap)
+        image = _pixmap_to_image(pixmap)
+        image.setDevicePixelRatio(_RENDER_QUALITY)
+        return image
     finally:
         document.close()
 

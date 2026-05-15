@@ -11,8 +11,8 @@ from takeoff_pro.data.models import Job
 class AIAnalysisWorker(QThread):
     """Run automated drawing review on a background thread."""
 
-    progress = pyqtSignal(str)        # status message
-    finished = pyqtSignal(int, object)  # (measurements_added, DrawingReview)
+    progress = pyqtSignal(str)           # status message
+    finished = pyqtSignal(int, object)   # (measurements_added, DrawingReview)
     error = pyqtSignal(str)
 
     def __init__(self, job: Job) -> None:
@@ -21,16 +21,21 @@ class AIAnalysisWorker(QThread):
         self._job = job
 
     def run(self) -> None:
-        """Execute the review pipeline and emit results."""
+        """Execute the review pipeline and emit per-page progress."""
         try:
-            self.progress.emit("Extracting scale notes and linework…")
-            review: DrawingReview = review_job_drawings(self._job)
+            n = len(self._job.pages)
+            self.progress.emit(f"Starting review of {n} page(s)…")
+
+            def on_page_progress(msg: str) -> None:
+                self.progress.emit(msg)
+
+            review: DrawingReview = review_job_drawings(
+                self._job, progress_callback=on_page_progress
+            )
             self.progress.emit(
-                f"Found {review.measurement_count} measurement suggestions "
-                f"across {len(review.pages)} page(s)…"
+                f"Applying {review.measurement_count} suggestion(s)…"
             )
             added = apply_drawing_review(self._job, review)
-            self.progress.emit(f"Applied {added} measurements.")
             self.finished.emit(added, review)
         except Exception as exc:  # noqa: BLE001
-            self.error.emit(str(exc))
+            self.error.emit(f"AI review failed: {exc}")

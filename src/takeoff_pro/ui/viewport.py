@@ -6,7 +6,7 @@ from collections.abc import Callable
 from itertools import pairwise
 from uuid import uuid4
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -33,6 +33,15 @@ from takeoff_pro.data.models import Measurement, MeasurementKind, Point
 
 class PageViewport(QGraphicsView):
     """Interactive page viewport with zoom, pan, fit, and rotation controls."""
+
+    # Emitted when the user presses a tool shortcut key (L/A/C).
+    tool_activation_requested = pyqtSignal(object)  # MeasurementKind
+    # Emitted when the user presses Escape to cancel the active tool.
+    tool_cancelled = pyqtSignal()
+    # Emitted when the user presses Enter to finish the active measurement.
+    measurement_finish_requested = pyqtSignal()
+    # Emitted when the user presses Delete to remove the last measurement.
+    delete_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Initialize the viewport scene and interaction state."""
@@ -62,6 +71,8 @@ class PageViewport(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Reduce unnecessary painter state saves for better render performance.
+        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontSavePainterState)
         viewport_widget = self.viewport()
         if viewport_widget is not None:
             viewport_widget.installEventFilter(self)
@@ -113,6 +124,8 @@ class PageViewport(QGraphicsView):
         """Set the active drawing tool."""
         self._active_tool = kind
         self._pending_points = []
+        if kind is None:
+            self._clear_pending_items()
 
     def set_measurement_created_callback(
         self,
@@ -223,7 +236,7 @@ class PageViewport(QGraphicsView):
         if event is None:
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            factor = 1.25 if event.angleDelta().y() > 0 else 1 / 1.25
             self.zoom_by(factor)
             event.accept()
             return
@@ -278,14 +291,63 @@ class PageViewport(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent | None) -> None:
-        """Track spacebar panning state."""
+        """Handle viewport keyboard shortcuts."""
         if event is None:
             return
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+        key = event.key()
+
+        if key == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_pressed = True
             self.setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
+
+        # Cancel active tool or pending measurement.
+        if key == Qt.Key.Key_Escape and not event.isAutoRepeat():
+            if self._pending_points or self._active_tool is not None or self._calibration_completed:
+                self._pending_points = []
+                self._calibration_points = []
+                self._calibration_completed = None
+                self._active_tool = None
+                self._clear_pending_items()
+                self.tool_cancelled.emit()
+                event.accept()
+                return
+
+        # Finish current measurement.
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.isAutoRepeat():
+            self.finish_active_measurement()
+            self.measurement_finish_requested.emit()
+            event.accept()
+            return
+
+        # Delete last measurement.
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and not event.isAutoRepeat():
+            self.delete_requested.emit()
+            event.accept()
+            return
+
+        # Zoom in/out.
+        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal) and not event.isAutoRepeat():
+            self.zoom_by(1.25)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Minus and not event.isAutoRepeat():
+            self.zoom_by(1 / 1.25)
+            event.accept()
+            return
+
+        # Tool shortcuts — emit to main window for state management.
+        _TOOL_KEYS = {
+            Qt.Key.Key_L: MeasurementKind.LENGTH,
+            Qt.Key.Key_A: MeasurementKind.AREA,
+            Qt.Key.Key_C: MeasurementKind.COUNT,
+        }
+        if key in _TOOL_KEYS and not event.isAutoRepeat():
+            self.tool_activation_requested.emit(_TOOL_KEYS[key])
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent | None) -> None:
