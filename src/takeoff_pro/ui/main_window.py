@@ -65,7 +65,7 @@ from takeoff_pro.reports import export_csv, export_pdf, export_xlsx
 from takeoff_pro.ui.ai_worker import AIAnalysisWorker
 from takeoff_pro.ui.commands import AddMeasurementCommand
 from takeoff_pro.ui.estimate_dialog import EstimateEditorDialog
-from takeoff_pro.ui.estimator_panel import EstimatorPanel
+from takeoff_pro.ui.estimator_web_panel import EstimatorWebPanel
 from takeoff_pro.ui.scale_dialog import ScaleCalibrationDialog
 from takeoff_pro.ui.viewport import PageViewport
 
@@ -595,7 +595,7 @@ class MainWindow(QMainWindow):
         self._workspace_stack.addWidget(self._build_review_page())      # 3
         self._workspace_stack.addWidget(self._build_estimate_page())    # 4
         self._workspace_stack.addWidget(self._build_reports_page())     # 5
-        self._estimator_panel = EstimatorPanel(self)
+        self._estimator_panel = EstimatorWebPanel(self)
         self._workspace_stack.addWidget(self._estimator_panel)          # 6
         layout.addWidget(self._workspace_stack, 1)
         return container

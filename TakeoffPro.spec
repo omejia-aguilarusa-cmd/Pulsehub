@@ -12,12 +12,20 @@ from PyInstaller.utils.hooks import (
 
 
 project_root = Path.cwd()
-datas = []
+
+# Bundle the PulseHubX estimator web UI alongside the executable
+_assets_src = project_root / "src" / "takeoff_pro" / "ui" / "assets"
+datas = [
+    (str(_assets_src / "estimator_ui.html"), "takeoff_pro/ui/assets"),
+]
 binaries = []
 hiddenimports = [
     "PyQt6.sip",
     "PyQt6.QtOpenGLWidgets",
     "PyQt6.QtOpenGL",
+    "PyQt6.QtWebEngineWidgets",
+    "PyQt6.QtWebEngineCore",
+    "PyQt6.QtWebChannel",
     "numpy",
     "numpy._core",
     "numpy._core._multiarray_umath",
@@ -26,6 +34,7 @@ hiddenimports = [
     "shapely",
     "shapely.lib",
     "takeoff_pro.ui.ai_worker",
+    "takeoff_pro.ui.estimator_web_panel",
     "takeoff_pro.render.profiler",
     "PIL",
     "PIL.Image",
@@ -54,6 +63,20 @@ hiddenimports += collect_submodules("numpy.linalg", filter=include_runtime_modul
 hiddenimports += collect_submodules("numpy.random", filter=include_runtime_module)
 hiddenimports += collect_submodules("shapely", filter=include_runtime_module)
 datas += collect_data_files("reportlab")
+
+# PyQt6-WebEngine: collect Qt WebEngine process binary and resources
+try:
+    _we_datas, _we_bins, _we_hidden = collect_all("PyQt6.QtWebEngineWidgets")
+    datas    += _we_datas
+    binaries += _we_bins
+    hiddenimports += _we_hidden
+    _wec_datas, _wec_bins, _wec_hidden = collect_all("PyQt6.QtWebEngineCore")
+    datas    += _wec_datas
+    binaries += _wec_bins
+    hiddenimports += _wec_hidden
+    datas += collect_data_files("PyQt6", includes=["**/QtWebEngine*", "**/resources/**", "**/translations/**"])
+except Exception:
+    pass  # WebEngine not installed — skip
 
 a = Analysis(
     [str(project_root / "src" / "takeoff_pro" / "__main__.py")],
