@@ -4,7 +4,7 @@ Takeoff Pro is a local desktop construction takeoff and estimating tool built wi
 
 ## Status
 
-Phases 0 through 5 are implemented locally: toolchain, legacy XML import, page viewer, takeoff tools, estimating, report exports, and Windows executable packaging.
+Phases 0 through 5 are implemented locally: toolchain, legacy XML import, page viewer, takeoff tools, estimating, report exports, Windows executable packaging, and a task-based workspace with local automated drawing review.
 
 ## Prerequisites
 
@@ -51,6 +51,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 ```
 
 The packaged app is written to `dist\TakeoffPro.exe`.
+
+## Current Capabilities
+
+- Upload local PDF or TIFF drawings directly into a native job.
+- Expand multi-page source files into individual document pages.
+- Review uploaded drawings locally for common PDF scale notes, vector linework, and rectangular regions.
+- Create confidence-tagged automated measurements after upload when linework is detected.
+- Keep unscaled drawings in page units until a reliable scale is available, instead of claiming field units prematurely.
 
 ## Development
 

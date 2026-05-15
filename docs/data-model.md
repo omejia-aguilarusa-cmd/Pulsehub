@@ -62,3 +62,16 @@ The automated tests use `tests/fixtures/sample_job/`, which contains synthetic X
 - One area section with four points.
 - One count section with two points.
 - One autolist container.
+
+## Native Extensions
+
+Native `.tkjob` saves keep the imported fields above and add app-owned metadata used after import:
+
+| Model | Native field | Purpose |
+| --- | --- | --- |
+| `Page` | `source_page_index` | Identifies the selected page inside a multi-page PDF or TIFF source. |
+| `Page` | `scale_pixels_per_unit`, `scale_unit`, `scale_source` | Stores the active calibration and whether it came from manual calibration or automated review. |
+| `Measurement` | `quantity`, `unit`, `secondary_quantity`, `secondary_unit` | Persists calculated quantities such as area plus perimeter. |
+| `Measurement` | `source`, `confidence` | Distinguishes manual measurements from local automated-review suggestions and records review confidence. |
+
+Imported legacy `ScaleX` and `ScaleY` remain separate fields. The geometry engine treats them as independent axes when no native calibration is present so anisotropic imports do not lose accuracy.

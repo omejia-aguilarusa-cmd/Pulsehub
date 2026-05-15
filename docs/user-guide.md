@@ -10,11 +10,17 @@ uv run takeoff-pro
 
 The application opens a desktop window titled "Takeoff Pro".
 
-## Open a Job Folder
+## Start a Job
 
-Use `File > Open Job Folder...` and choose a folder that contains legacy `Data.xml` job content. Pages appear in the left panel. Selecting a page renders its local PDF or TIFF image when the file is available.
+The left workspace rail gives direct access to:
 
-Native `.tkjob` folders can also be opened from the same command.
+- `New blank job` for manual takeoff work.
+- `Upload drawings` for local PDF or TIFF files.
+- `Open job folder` for imported legacy jobs or native `.tkjob` folders.
+
+Uploaded multi-page PDFs become one page entry per source page. The app runs a local automated review immediately after upload and opens the `AI Review` workspace so the generated results are visible without extra setup.
+
+Native `.tkjob` folders can also be opened from `File > Open Job Folder...`.
 
 ## Viewer Controls
 
@@ -25,15 +31,24 @@ Native `.tkjob` folders can also be opened from the same command.
 - `1`: show the page at actual size.
 - `R`: rotate the view clockwise.
 
+## Workspace Sections
+
+- `Dashboard` summarizes pages, measurements, scaled pages, and estimate total.
+- `Documents` lists imported pages, source files, and scale status. Double-click a row to open it in takeoff.
+- `Takeoff` contains the page list, drawing viewport, and live measurements panel.
+- `AI Review` shows detected scales, generated suggestions, applied measurements, and review notes.
+- `Estimate` exposes the priced BOM and estimate-library actions.
+- `Reports` exports CSV, XLSX, and PDF output.
+
 ## Create Takeoff
 
 Use `File > New Blank Job` to start a local job with one blank page. Select a takeoff tool from the toolbar:
 
-- Length: click two points to create one length measurement.
+- Length: click polyline points, then double-click or use `Tools > Finish Measurement`.
 - Area: click polygon points, then double-click to finish.
 - Count: click once per marker.
 
-Use `Tools > Set Scale`, click two points on the page, then enter the real-world distance and units. New measurements use the page scale for LF, SF, or count quantities.
+Use `Tools > Set Scale`, click two points on the page, then enter the real-world distance and units. Existing measurements on the calibrated page are recalculated immediately, and future measurements use the updated page scale for LF, SF, or count quantities. Unscaled pages report measurements in page units instead of pretending to be field units.
 
 Use `File > Save As Native Job...` to save the current job as a `.tkjob` folder. The native job can be reopened with `File > Open Job Folder...`.
 
@@ -52,3 +67,9 @@ Use the `Reports` menu to export the current job:
 - `Reports > Export PDF...` writes a printable report with summary and detail tables.
 
 Reports use the same attached item and assembly pricing shown in the measurements panel.
+
+## Automated Review
+
+`AI Review` is fully local and makes no network calls. On vector PDFs it can read common scale notes such as `1" = 10'`, detect straight vector linework, identify rectangular vector regions, and create suggested length or area measurements automatically. Raster drawings without a readable scale note can still produce visual suggestions, but they stay in page units until a reliable scale is available.
+
+Automated output is intended as a fast first pass. Review the detected scale source and confidence before using the results for pricing or field decisions.

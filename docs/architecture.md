@@ -66,3 +66,15 @@ Report exports are implemented in `takeoff_pro.reports`:
 - `pdf_report` creates a local PDF report with summary, detail, cost tables, and page footer numbering.
 
 The main window owns file-dialog routing only; report formatting and pricing remain outside the UI layer. Packaging is defined by `TakeoffPro.spec`, and `scripts/build_exe.ps1` runs PyInstaller to produce `dist\TakeoffPro.exe`.
+
+## Accuracy and Automated Review
+
+Measurement math now treats native calibration as isotropic and imported legacy `ScaleX` / `ScaleY` as independent axes. Length, area, and perimeter calculations transform each point into real-world units before performing geometry math, so non-square imported scales remain correct. Recalibration refreshes stored quantities instead of leaving stale numbers in `job.json`.
+
+Uploaded drawings enter through `takeoff_pro.data.drawing_importer`, which expands multi-page PDF or TIFF sources into native `Page` models while keeping source page indices explicit. `takeoff_pro.analysis.drawing_analyzer` performs a fully local automated pass over each uploaded page. It can infer common PDF scale notes, inspect vector commands for straight segments and rectangles, fall back to simple raster line detection, and emit confidence-tagged suggestions that the UI applies into dedicated automated-review sections.
+
+The analyzer is intentionally conservative: if no reliable scale is found, the resulting suggestions stay in page units so the product does not claim field accuracy it does not have.
+
+## Workspace Shell
+
+`takeoff_pro.ui.main_window.MainWindow` now exposes a task-based workspace with functional sections for dashboard, documents, takeoff, automated review, estimating, and reports. The takeoff viewport remains the core working surface, while the surrounding shell makes upload, analysis, BOM, and output tasks available without depending on menu discovery.
