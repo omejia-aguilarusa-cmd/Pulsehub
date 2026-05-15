@@ -16,6 +16,8 @@ datas = []
 binaries = []
 hiddenimports = [
     "PyQt6.sip",
+    "PyQt6.QtOpenGLWidgets",
+    "PyQt6.QtOpenGL",
     "numpy",
     "numpy._core",
     "numpy._core._multiarray_umath",
@@ -24,6 +26,7 @@ hiddenimports = [
     "shapely",
     "shapely.lib",
     "takeoff_pro.ui.ai_worker",
+    "takeoff_pro.render.profiler",
     "PIL",
     "PIL.Image",
     "PIL.TiffImagePlugin",

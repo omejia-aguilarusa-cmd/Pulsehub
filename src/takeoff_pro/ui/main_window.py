@@ -54,7 +54,13 @@ from takeoff_pro.data.models import Measurement, MeasurementKind, Point, Takeoff
 from takeoff_pro.data.planswift_importer import LegacyImportError
 from takeoff_pro.estimate import Assembly, AssemblyComponent, EstimateItem
 from takeoff_pro.estimate.pricing import UnitConversionError, price_job
-from takeoff_pro.render import PageRenderError, render_page_to_image
+from takeoff_pro.render import (
+    PageRenderError,
+    get_page_dimensions,
+    render_page_region,
+    render_page_thumbnail,
+    render_page_to_image,
+)
 from takeoff_pro.reports import export_csv, export_pdf, export_xlsx
 from takeoff_pro.ui.ai_worker import AIAnalysisWorker
 from takeoff_pro.ui.commands import AddMeasurementCommand
@@ -104,10 +110,32 @@ _SCALE_PRESETS: list[tuple[str, float, float]] = [
 ]
 
 
-# ── Background page render worker ─────────────────────────────────────────────
+# ── Background workers ────────────────────────────────────────────────────────
+
+class _ThumbnailWorker(QThread):
+    """Fast low-res render for immediate display while full quality loads."""
+
+    rendered = pyqtSignal(str, object)   # (page_id, QImage)
+    failed   = pyqtSignal(str, str)
+
+    def __init__(self, page_id: str, image_path: Path, page_index: int) -> None:
+        super().__init__()
+        self._page_id = page_id
+        self._image_path = image_path
+        self._page_index = page_index
+
+    def run(self) -> None:
+        try:
+            image = render_page_thumbnail(
+                self._image_path, page_index=self._page_index, max_px=768
+            )
+            self.rendered.emit(self._page_id, image)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._page_id, str(exc))
+
 
 class _PageRenderWorker(QThread):
-    """Renders a single PDF/TIFF page to a QImage on a background thread."""
+    """Renders a single PDF/TIFF page to a full-quality QImage."""
 
     rendered = pyqtSignal(str, object)   # (page_id, QImage)
     failed   = pyqtSignal(str, str)      # (page_id, error_message)
@@ -122,6 +150,44 @@ class _PageRenderWorker(QThread):
         try:
             image = render_page_to_image(self._image_path, page_index=self._page_index)
             self.rendered.emit(self._page_id, image)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(self._page_id, str(exc))
+
+
+class _AdaptiveRenderWorker(QThread):
+    """Renders a high-quality region of a page for adaptive zoom quality.
+
+    Triggered after the user zooms in beyond the current render quality.
+    The result is overlaid on top of the base image via viewport.show_detail_image.
+    """
+
+    rendered = pyqtSignal(str, object, float, float)  # (page_id, QImage, origin_x, origin_y)
+    failed   = pyqtSignal(str, str)
+
+    def __init__(
+        self,
+        page_id: str,
+        image_path: Path,
+        page_index: int,
+        region_pts: tuple[float, float, float, float],
+        zoom: float,
+    ) -> None:
+        super().__init__()
+        self._page_id = page_id
+        self._image_path = image_path
+        self._page_index = page_index
+        self._region_pts = region_pts
+        self._zoom = zoom
+
+    def run(self) -> None:
+        try:
+            image, (ox, oy) = render_page_region(
+                self._image_path,
+                page_index=self._page_index,
+                region_pts=self._region_pts,
+                zoom=self._zoom,
+            )
+            self.rendered.emit(self._page_id, image, ox, oy)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(self._page_id, str(exc))
 
@@ -145,7 +211,12 @@ class MainWindow(QMainWindow):
         self._last_review: DrawingReview | None = None
         self._undo_stack = QUndoStack(self)
         self._ai_worker: AIAnalysisWorker | None = None
+        self._thumbnail_worker: _ThumbnailWorker | None = None
         self._render_worker: _PageRenderWorker | None = None
+        self._adaptive_worker: _AdaptiveRenderWorker | None = None
+        # Tracks whether we're still waiting for a thumbnail (so full-quality
+        # render takes precedence if it finishes first).
+        self._showing_thumbnail: bool = False
 
         # Widgets populated in _build_* helpers
         self._sidebar = QListWidget(self)
@@ -178,13 +249,14 @@ class MainWindow(QMainWindow):
         self._document_table.cellDoubleClicked.connect(self._open_document_row)
         self._viewport.set_placeholder("Open a job folder or upload drawings to begin.")
 
-        # Viewport keyboard signals
+        # Viewport signals
         self._viewport.tool_activation_requested.connect(self._on_tool_activation_requested)
         self._viewport.tool_cancelled.connect(self._on_tool_cancelled)
         self._viewport.measurement_finish_requested.connect(
             self._viewport.finish_active_measurement
         )
         self._viewport.delete_requested.connect(self._delete_last_measurement_on_page)
+        self._viewport.adaptive_render_needed.connect(self._on_adaptive_render_needed)
 
         self._sidebar.setCurrentRow(0)
         self._refresh_workspace()
@@ -329,13 +401,24 @@ class MainWindow(QMainWindow):
                 return
 
     def closeEvent(self, event: object) -> None:  # type: ignore[override]
-        """Clean up background workers before closing."""
-        if self._render_worker is not None:
-            self._render_worker.rendered.disconnect()
-            self._render_worker.failed.disconnect()
+        """Disconnect background worker signals before closing."""
+        for worker in (
+            self._thumbnail_worker,
+            self._render_worker,
+            self._adaptive_worker,
+        ):
+            if worker is not None:
+                try:
+                    worker.rendered.disconnect()
+                    worker.failed.disconnect()
+                except RuntimeError:
+                    pass
         if self._ai_worker is not None:
-            self._ai_worker.finished.disconnect()
-            self._ai_worker.error.disconnect()
+            try:
+                self._ai_worker.finished.disconnect()
+                self._ai_worker.error.disconnect()
+            except RuntimeError:
+                pass
         super().closeEvent(event)  # type: ignore[arg-type]
 
     # ── Drag-and-drop ─────────────────────────────────────────────────────────
@@ -972,6 +1055,17 @@ class MainWindow(QMainWindow):
             keys_act.triggered.connect(self._show_keybind_help)
             help_menu.addAction(keys_act)
 
+            perf_act = QAction("&Performance Overlay", self)
+            perf_act.setShortcut(QKeySequence("Ctrl+Shift+P"))
+            perf_act.setCheckable(True)
+            perf_act.triggered.connect(self._toggle_perf_overlay)
+            help_menu.addAction(perf_act)
+
+            help_menu.addSeparator()
+            diag_act = QAction("Log Render &Diagnostics", self)
+            diag_act.triggered.connect(self._log_render_diagnostics)
+            help_menu.addAction(diag_act)
+
     # ── Stylesheet ────────────────────────────────────────────────────────────
 
     def _apply_stylesheet(self) -> None:
@@ -1465,7 +1559,7 @@ class MainWindow(QMainWindow):
     def _load_page(self, page: Page) -> None:
         self._current_page = page
         self._viewport.set_current_page_id(page.id)
-        # Update status and scale indicator immediately (synchronous) so tests pass.
+        # Status and scale updated synchronously so existing tests pass immediately.
         self._show_status(page.name)
         self._update_scale_indicator()
 
@@ -1474,13 +1568,51 @@ class MainWindow(QMainWindow):
             self._refresh_current_page_overlays()
             return
 
-        # Show a lightweight placeholder while the render runs in the background.
+        # Stage 1: thumbnail for near-instant display.
+        # Stage 2: full-quality render (runs in parallel, replaces thumbnail).
         self._viewport.set_placeholder(f"Loading {page.name}…")
-        self._refresh_current_page_overlays()
+        self._showing_thumbnail = True
+        self._start_thumbnail_render(page)
         self._start_page_render(page)
 
+    def _start_thumbnail_render(self, page: Page) -> None:
+        """Start a fast low-res thumbnail render (Stage 1)."""
+        if self._thumbnail_worker is not None:
+            try:
+                self._thumbnail_worker.rendered.disconnect()
+                self._thumbnail_worker.failed.disconnect()
+            except RuntimeError:
+                pass
+
+        if page.image_path is None:
+            return
+
+        worker = _ThumbnailWorker(page.id, page.image_path, page.source_page_index)
+        worker.rendered.connect(self._on_thumbnail_ready)
+        worker.failed.connect(self._on_thumbnail_failed)
+        self._thumbnail_worker = worker
+        worker.start()
+
+    def _on_thumbnail_ready(self, page_id: str, image: object) -> None:
+        """Show the thumbnail only if the full-quality render hasn't arrived yet."""
+        if self._current_page is None or self._current_page.id != page_id:
+            return
+        if not isinstance(image, QImage):
+            return
+        if not self._showing_thumbnail:
+            return  # Full-quality image already displayed — discard thumbnail.
+        self._viewport.set_image(image)
+        # Mark the base image as thumbnail quality so the adaptive system knows
+        # to schedule a quality upgrade at the current display zoom.
+        self._viewport.set_render_quality(image.devicePixelRatio())
+        self._refresh_current_page_overlays()
+        self._thumbnail_worker = None
+
+    def _on_thumbnail_failed(self, page_id: str, message: str) -> None:
+        _ = page_id, message  # thumbnail failure is non-fatal; full render continues
+
     def _start_page_render(self, page: Page) -> None:
-        """Kick off a background render for page, discarding any previous render."""
+        """Start the full-quality background render (Stage 2)."""
         if self._render_worker is not None:
             try:
                 self._render_worker.rendered.disconnect()
@@ -1498,23 +1630,76 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_page_rendered(self, page_id: str, image: object) -> None:
-        """Handle a successfully rendered page image."""
+        """Replace the thumbnail (or placeholder) with the full-quality image."""
         if self._current_page is None or self._current_page.id != page_id:
-            return  # Page changed while rendering — discard stale result.
+            return
         if not isinstance(image, QImage):
             return
+        self._showing_thumbnail = False
         self._viewport.set_image(image)
+        self._viewport.set_render_quality(image.devicePixelRatio())  # _RENDER_QUALITY
         self._refresh_current_page_overlays()
         self._render_worker = None
 
     def _on_page_render_failed(self, page_id: str, message: str) -> None:
-        """Handle a failed page render."""
+        """Handle a failed full-quality render."""
         if self._current_page is None or self._current_page.id != page_id:
             return
-        self._viewport.set_placeholder("Page image could not be rendered.")
+        self._showing_thumbnail = False
+        if self._viewport._pixmap_item is None:
+            # Thumbnail also failed — show an error placeholder.
+            self._viewport.set_placeholder("Page image could not be rendered.")
         self._show_status(f"Render error: {message}")
         LOGGER.error("Page render failed for %s: %s", page_id, message)
         self._render_worker = None
+
+    # ── Adaptive quality render ────────────────────────────────────────────────
+
+    def _on_adaptive_render_needed(self, target_zoom: float, visible_rect: object) -> None:
+        """Handle the viewport's request for a higher-quality region render."""
+        from PyQt6.QtCore import QRectF as _QRectF
+        if self._current_page is None or self._current_page.image_path is None:
+            return
+        if not isinstance(visible_rect, _QRectF):
+            return
+        if self._adaptive_worker is not None and self._adaptive_worker.isRunning():
+            return  # Already rendering an adaptive region.
+
+        page = self._current_page
+        x0 = max(0.0, visible_rect.left())
+        y0 = max(0.0, visible_rect.top())
+        x1 = visible_rect.right()
+        y1 = visible_rect.bottom()
+        if x1 <= x0 or y1 <= y0:
+            return
+
+        worker = _AdaptiveRenderWorker(
+            page.id,
+            page.image_path,
+            page.source_page_index,
+            region_pts=(x0, y0, x1, y1),
+            zoom=target_zoom,
+        )
+        worker.rendered.connect(self._on_adaptive_rendered)
+        worker.failed.connect(self._on_adaptive_failed)
+        self._adaptive_worker = worker
+        worker.start()
+
+    def _on_adaptive_rendered(
+        self, page_id: str, image: object, origin_x: float, origin_y: float
+    ) -> None:
+        """Overlay the high-quality region image on the viewport."""
+        if self._current_page is None or self._current_page.id != page_id:
+            return
+        if not isinstance(image, QImage):
+            return
+        self._viewport.show_detail_image(image, origin_x, origin_y)
+        self._viewport.set_render_quality(image.devicePixelRatio())
+        self._adaptive_worker = None
+
+    def _on_adaptive_failed(self, page_id: str, message: str) -> None:
+        LOGGER.debug("Adaptive render failed for %s: %s", page_id, message)
+        self._adaptive_worker = None
 
     # ── Tools ─────────────────────────────────────────────────────────────────
 
@@ -1645,6 +1830,33 @@ class MainWindow(QMainWindow):
             self._preset_btn.rect().bottomLeft()
         ))
 
+    # ── Profiling / diagnostics ───────────────────────────────────────────────
+
+    def _toggle_perf_overlay(self) -> None:
+        """Toggle the performance overlay on the viewport (Ctrl+Shift+P)."""
+        visible = self._viewport.toggle_perf_overlay()
+        self._show_status(
+            "Performance overlay ON — GPU, zoom, render times." if visible
+            else "Performance overlay OFF."
+        )
+
+    def _log_render_diagnostics(self) -> None:
+        """Write render-profiler stats to the log and show a summary dialog."""
+        from takeoff_pro.render.profiler import profiler as _p
+        stats = _p.all_stats()
+        lines = [f"  {name}: avg {v['avg_ms']:.1f} ms, last {v['last_ms']:.1f} ms"
+                 for name, v in stats.items()]
+        summary = "\n".join(lines) if lines else "  No render events recorded yet."
+        gpu_info = (
+            f"GPU backend: {'OpenGL (Qt RHI)' if self._viewport.gpu_enabled else 'Software'}"
+        )
+        LOGGER.info("Render diagnostics:\n%s\n%s", gpu_info, summary)
+        QMessageBox.information(
+            self,
+            "Render Diagnostics",
+            f"{gpu_info}\n\nPipeline timings:\n{summary}",
+        )
+
     # ── Keybind help ──────────────────────────────────────────────────────────
 
     def _show_keybind_help(self) -> None:
@@ -1680,6 +1892,8 @@ class MainWindow(QMainWindow):
             "&nbsp;&nbsp;Ctrl+N — New blank job<br>"
             "&nbsp;&nbsp;Ctrl+O — Open job folder<br>"
             "&nbsp;&nbsp;Ctrl+S — Save as native job<br>"
+            "<br><b>Diagnostics</b><br>"
+            "&nbsp;&nbsp;Ctrl+Shift+P — Performance overlay (GPU, zoom, render times)<br>"
         )
         text.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(text)
