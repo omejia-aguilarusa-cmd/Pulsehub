@@ -14,6 +14,7 @@ dependencies = [
     "PyQt6==6.8.1",
     "Pillow==11.1.0",
     "lxml==5.3.1",
+    "numpy==2.2.3",
     "openpyxl==3.1.5",
     "pydantic==2.10.6",
     "pymupdf==1.25.3",

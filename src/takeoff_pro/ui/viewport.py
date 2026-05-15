@@ -135,6 +135,15 @@ class PageViewport(QGraphicsView):
         self._append_pending_point(Point(x=x, y=y, point_type="Normal"))
         self._finish_if_tool_complete()
 
+    def finish_active_measurement(self) -> None:
+        """Finish the active polyline or polygon measurement."""
+        minimum_points = 2 if self._active_tool == MeasurementKind.LENGTH else 3
+        if (
+            self._active_tool in {MeasurementKind.LENGTH, MeasurementKind.AREA}
+            and len(self._pending_points) >= minimum_points
+        ):
+            self._finish_pending_measurement()
+
     def show_measurements(self, measurements: list[Measurement]) -> None:
         """Render measurement overlays for the current page."""
         self._clear_overlays()
@@ -201,7 +210,7 @@ class PageViewport(QGraphicsView):
         return super().eventFilter(watched, event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent | None) -> None:
-        """Finish an area measurement on double-click."""
+        """Finish a polyline or area measurement on double-click."""
         if event is None:
             return
         if self._handle_drawing_double_click(event):
@@ -308,16 +317,17 @@ class PageViewport(QGraphicsView):
         return False
 
     def _handle_drawing_double_click(self, event: QMouseEvent) -> bool:
-        is_area_click = (
-            self._active_tool == MeasurementKind.AREA
+        is_finish_click = (
+            self._active_tool in {MeasurementKind.LENGTH, MeasurementKind.AREA}
             and event.button() == Qt.MouseButton.LeftButton
         )
-        if not is_area_click:
+        if not is_finish_click:
             return False
         scene_point = self.mapToScene(event.position().toPoint())
-        self._append_pending_point(Point(x=scene_point.x(), y=scene_point.y(), point_type="Normal"))
-        if len(self._pending_points) >= 3:
-            self._finish_pending_measurement()
+        self._append_pending_point_if_distinct(
+            Point(x=scene_point.x(), y=scene_point.y(), point_type="Normal")
+        )
+        self.finish_active_measurement()
         return True
 
     def _handle_tool_click(self, event: QMouseEvent) -> None:
@@ -342,10 +352,15 @@ class PageViewport(QGraphicsView):
         self._pending_points.append(point)
         self._draw_pending_points()
 
+    def _append_pending_point_if_distinct(self, point: Point) -> None:
+        if self._pending_points:
+            last_point = self._pending_points[-1]
+            if last_point.x == point.x and last_point.y == point.y:
+                return
+        self._append_pending_point(point)
+
     def _finish_if_tool_complete(self) -> None:
         if self._active_tool == MeasurementKind.COUNT:
-            self._finish_pending_measurement()
-        elif self._active_tool == MeasurementKind.LENGTH and len(self._pending_points) >= 2:
             self._finish_pending_measurement()
 
     def _finish_pending_measurement(self) -> None:
