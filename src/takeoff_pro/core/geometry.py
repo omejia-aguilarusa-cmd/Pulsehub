@@ -27,13 +27,14 @@ def calculate_measurement(
     page: Page | None,
 ) -> MeasurementResult:
     """Calculate measurement quantity from page-space points."""
-    scale = _scale_pixels_per_unit(page)
+    x_scale, y_scale = _scale_pixels_per_unit(page)
     linear_unit = _linear_unit(page)
     if kind == MeasurementKind.COUNT:
         return MeasurementResult(quantity=float(len(points)), unit="EA")
     if kind == MeasurementKind.AREA:
-        area = _area(points) / (scale * scale)
-        perimeter = _length(points + points[:1]) / scale if len(points) > 2 else 0.0
+        scaled_points = _scale_points(points, x_scale=x_scale, y_scale=y_scale)
+        area = _area(scaled_points)
+        perimeter = _length(scaled_points + scaled_points[:1]) if len(points) > 2 else 0.0
         return MeasurementResult(
             quantity=area,
             unit=_area_unit(linear_unit),
@@ -41,7 +42,8 @@ def calculate_measurement(
             secondary_unit=_length_unit(linear_unit),
         )
     if kind == MeasurementKind.LENGTH:
-        return MeasurementResult(quantity=_length(points) / scale, unit=_length_unit(linear_unit))
+        scaled_points = _scale_points(points, x_scale=x_scale, y_scale=y_scale)
+        return MeasurementResult(quantity=_length(scaled_points), unit=_length_unit(linear_unit))
     return MeasurementResult(quantity=0.0, unit="")
 
 
@@ -58,14 +60,29 @@ def _area(points: list[Point]) -> float:
     return abs(float(polygon.area))
 
 
-def _scale_pixels_per_unit(page: Page | None) -> float:
+def _scale_points(points: list[Point], *, x_scale: float, y_scale: float) -> list[Point]:
+    return [
+        Point(
+            x=point.x / x_scale,
+            y=point.y / y_scale,
+            point_type=point.point_type,
+        )
+        for point in points
+    ]
+
+
+def _scale_pixels_per_unit(page: Page | None) -> tuple[float, float]:
     if page is None:
-        return 1.0
+        return 1.0, 1.0
     if page.scale_pixels_per_unit and page.scale_pixels_per_unit > 0:
-        return page.scale_pixels_per_unit
+        return page.scale_pixels_per_unit, page.scale_pixels_per_unit
+    if page.scale_x and page.scale_x > 0 and page.scale_y and page.scale_y > 0:
+        return page.scale_x, page.scale_y
     if page.scale_x and page.scale_x > 0:
-        return page.scale_x
-    return 1.0
+        return page.scale_x, page.scale_x
+    if page.scale_y and page.scale_y > 0:
+        return page.scale_y, page.scale_y
+    return 1.0, 1.0
 
 
 def _linear_unit(page: Page | None) -> str:

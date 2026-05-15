@@ -14,9 +14,6 @@ def create_blank_job(name: str = "Untitled Job") -> Job:
         id=str(uuid4()),
         name="Blank Page",
         order_index=0,
-        scale_units="FT",
-        scale_unit="FT",
-        scale_pixels_per_unit=1.0,
     )
     return Job(
         id=str(uuid4()),

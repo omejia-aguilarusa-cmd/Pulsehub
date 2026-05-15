@@ -1,5 +1,6 @@
 """Data models, persistence, and import helpers."""
 
+from takeoff_pro.data.drawing_importer import DrawingImportError, import_drawings
 from takeoff_pro.data.job_factory import create_blank_job
 from takeoff_pro.data.models import (
     Autolist,
@@ -16,6 +17,7 @@ from takeoff_pro.data.planswift_importer import LegacyImportError, import_job, i
 
 __all__ = [
     "Autolist",
+    "DrawingImportError",
     "Job",
     "LegacyImportError",
     "LegacyProperty",
@@ -26,6 +28,7 @@ __all__ = [
     "Point",
     "TakeoffSection",
     "create_blank_job",
+    "import_drawings",
     "import_job",
     "import_jobs",
     "is_native_job_folder",

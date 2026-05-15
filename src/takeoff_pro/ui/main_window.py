@@ -4,28 +4,43 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QAction, QActionGroup, QKeySequence, QUndoStack
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSplitter,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
+from takeoff_pro.analysis import DrawingReview, apply_drawing_review, review_job_drawings
 from takeoff_pro.core import calculate_measurement
 from takeoff_pro.data import (
+    DrawingImportError,
     Job,
     Page,
     PersistenceError,
     create_blank_job,
+    import_drawings,
     import_job,
     is_native_job_folder,
     load_job,
@@ -57,8 +72,19 @@ class MainWindow(QMainWindow):
         self._job: Job | None = None
         self._current_page: Page | None = None
         self._pages_by_id: dict[str, Page] = {}
+        self._last_review: DrawingReview | None = None
         self._undo_stack = QUndoStack(self)
 
+        self._sidebar = QListWidget(self)
+        self._workspace_stack = QStackedWidget(self)
+        self._workspace_title = QLabel("Dashboard", self)
+        self._workspace_subtitle = QLabel("No job open", self)
+        self._metric_labels: dict[str, QLabel] = {}
+        self._document_table = QTableWidget(self)
+        self._review_table = QTableWidget(self)
+        self._review_notes = QListWidget(self)
+        self._estimate_table = QTableWidget(self)
+        self._report_summary = QLabel(self)
         self._page_list = QListWidget(self)
         self._page_list.setObjectName("pageList")
         self._measurement_list = QListWidget(self)
@@ -66,20 +92,20 @@ class MainWindow(QMainWindow):
         self._viewport = PageViewport(self)
         self._viewport.set_measurement_created_callback(self._on_measurement_created)
 
-        splitter = QSplitter(self)
-        splitter.addWidget(self._page_list)
-        splitter.addWidget(self._viewport)
-        splitter.addWidget(self._measurement_list)
-        splitter.setSizes([250, 780, 250])
-        self.setCentralWidget(splitter)
-
+        self._create_workspace()
         self._create_actions()
+        self._apply_workspace_style()
         self._page_list.currentItemChanged.connect(self._on_page_changed)
-        self._viewport.set_placeholder("Open a job folder to view pages.")
+        self._sidebar.currentRowChanged.connect(self._on_workspace_changed)
+        self._document_table.cellDoubleClicked.connect(self._open_document_row)
+        self._viewport.set_placeholder("Open a job folder or upload drawings to begin.")
+        self._sidebar.setCurrentRow(0)
+        self._refresh_workspace()
 
     def new_blank_job(self) -> None:
         """Create a blank native job for new takeoff work."""
         self._set_job(create_blank_job())
+        self._sidebar.setCurrentRow(2)
 
     def open_job_folder(self, folder_path: str | Path) -> None:
         """Open an imported or native job folder and populate the page list."""
@@ -95,6 +121,19 @@ class MainWindow(QMainWindow):
             return
 
         self._set_job(job)
+        self._sidebar.setCurrentRow(0)
+
+    def import_drawing_files(self, file_paths: Sequence[str | Path]) -> None:
+        """Import local PDF or TIFF drawings and run automated review."""
+        try:
+            job = import_drawings(file_paths)
+        except DrawingImportError as exc:
+            LOGGER.exception("Could not import drawing files")
+            QMessageBox.critical(self, "Upload Drawings", str(exc))
+            return
+        self._set_job(job)
+        self._run_automated_review()
+        self._sidebar.setCurrentRow(3)
 
     def save_job_folder(self, folder_path: str | Path) -> None:
         """Save the current job to a native `.tkjob` folder."""
@@ -176,6 +215,259 @@ class MainWindow(QMainWindow):
         else:
             self._show_status(f"{kind.value.title()} tool active.")
 
+    def _create_workspace(self) -> None:
+        root = QWidget(self)
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        sidebar_frame = QFrame(root)
+        sidebar_frame.setObjectName("sidebarFrame")
+        sidebar_layout = QVBoxLayout(sidebar_frame)
+        sidebar_layout.setContentsMargins(16, 18, 16, 18)
+        sidebar_layout.setSpacing(12)
+
+        brand = QLabel("Takeoff Pro", sidebar_frame)
+        brand.setObjectName("brandLabel")
+        sidebar_layout.addWidget(brand)
+
+        for label, callback in (
+            ("New blank job", self.new_blank_job),
+            ("Upload drawings", self._choose_drawing_files),
+            ("Open job folder", self._choose_job_folder),
+        ):
+            button = QPushButton(label, sidebar_frame)
+            button.clicked.connect(callback)
+            sidebar_layout.addWidget(button)
+
+        self._sidebar.setObjectName("workspaceNav")
+        self._sidebar.addItems(
+            ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports"]
+        )
+        sidebar_layout.addWidget(self._sidebar, 1)
+
+        content = QWidget(root)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 18, 24, 24)
+        content_layout.setSpacing(16)
+        self._workspace_title.setObjectName("workspaceTitle")
+        self._workspace_subtitle.setObjectName("workspaceSubtitle")
+        content_layout.addWidget(self._workspace_title)
+        content_layout.addWidget(self._workspace_subtitle)
+        content_layout.addWidget(self._workspace_stack, 1)
+
+        self._workspace_stack.addWidget(self._build_dashboard_page())
+        self._workspace_stack.addWidget(self._build_documents_page())
+        self._workspace_stack.addWidget(self._build_takeoff_page())
+        self._workspace_stack.addWidget(self._build_review_page())
+        self._workspace_stack.addWidget(self._build_estimate_page())
+        self._workspace_stack.addWidget(self._build_reports_page())
+
+        root_layout.addWidget(sidebar_frame)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(root)
+
+    def _build_dashboard_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        metric_row = QHBoxLayout()
+        for key, label in (
+            ("pages", "Pages"),
+            ("measurements", "Measurements"),
+            ("scaled_pages", "Scaled pages"),
+            ("estimate_total", "Estimate total"),
+        ):
+            frame, value = self._metric_frame(label)
+            self._metric_labels[key] = value
+            metric_row.addWidget(frame)
+        layout.addLayout(metric_row)
+
+        quick_actions = QHBoxLayout()
+        for label, callback in (
+            ("Upload drawings", self._choose_drawing_files),
+            ("Open job folder", self._choose_job_folder),
+            ("Run AI review", self._run_automated_review),
+        ):
+            button = QPushButton(label, page)
+            button.clicked.connect(callback)
+            quick_actions.addWidget(button)
+        quick_actions.addStretch(1)
+        layout.addLayout(quick_actions)
+
+        self._dashboard_sections = QTableWidget(page)
+        self._configure_table(
+            self._dashboard_sections,
+            ["Section", "Kind", "Measurements", "Quantity"],
+        )
+        layout.addWidget(self._dashboard_sections, 1)
+        return page
+
+    def _build_documents_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        actions = QHBoxLayout()
+        for label, callback in (
+            ("Upload drawings", self._choose_drawing_files),
+            ("Open job folder", self._choose_job_folder),
+        ):
+            button = QPushButton(label, page)
+            button.clicked.connect(callback)
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self._configure_table(
+            self._document_table,
+            ["Page", "Source", "Source page", "Scale", "Status"],
+        )
+        layout.addWidget(self._document_table, 1)
+        return page
+
+    def _build_takeoff_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        splitter = QSplitter(page)
+        splitter.addWidget(self._page_list)
+        splitter.addWidget(self._viewport)
+        splitter.addWidget(self._measurement_list)
+        splitter.setSizes([240, 760, 280])
+        layout.addWidget(splitter)
+        return page
+
+    def _build_review_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        actions = QHBoxLayout()
+        run_button = QPushButton("Run review", page)
+        run_button.clicked.connect(self._run_automated_review)
+        actions.addWidget(run_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self._configure_table(
+            self._review_table,
+            ["Page", "Scale source", "Suggested measurements", "Applied measurements"],
+        )
+        layout.addWidget(self._review_table, 2)
+        layout.addWidget(QLabel("Review notes", page))
+        layout.addWidget(self._review_notes, 1)
+        return page
+
+    def _build_estimate_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        actions = QHBoxLayout()
+        for label, callback in (
+            ("Items and assemblies", self._edit_estimate_library),
+            ("Attach first item", self._attach_first_item),
+            ("Attach first assembly", self._attach_first_assembly),
+        ):
+            button = QPushButton(label, page)
+            button.clicked.connect(callback)
+            actions.addWidget(button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        self._configure_table(
+            self._estimate_table,
+            ["Item", "Description", "Quantity", "Unit", "Unit cost", "Total"],
+        )
+        layout.addWidget(self._estimate_table, 1)
+        return page
+
+    def _build_reports_page(self) -> QWidget:
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self._report_summary.setWordWrap(True)
+        layout.addWidget(self._report_summary)
+        for label, callback in (
+            ("Export CSV", self._choose_csv_report),
+            ("Export XLSX", self._choose_xlsx_report),
+            ("Export PDF", self._choose_pdf_report),
+        ):
+            button = QPushButton(label, page)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return page
+
+    def _metric_frame(self, label: str) -> tuple[QFrame, QLabel]:
+        frame = QFrame(self)
+        frame.setObjectName("metricFrame")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 12)
+        caption = QLabel(label, frame)
+        caption.setObjectName("metricCaption")
+        value = QLabel("0", frame)
+        value.setObjectName("metricValue")
+        layout.addWidget(caption)
+        layout.addWidget(value)
+        return frame, value
+
+    def _configure_table(self, table: QTableWidget, headers: list[str]) -> None:
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        vertical_header = table.verticalHeader()
+        if vertical_header is not None:
+            vertical_header.setVisible(False)
+        horizontal_header = table.horizontalHeader()
+        if horizontal_header is not None:
+            horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+    def _apply_workspace_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow { background: #f5f6f7; }
+            #sidebarFrame { background: #202124; min-width: 210px; max-width: 210px; }
+            #brandLabel { color: #ffffff; font-size: 21px; font-weight: 700; }
+            #workspaceNav {
+                background: transparent;
+                color: #d1d5db;
+                border: 0;
+                outline: 0;
+            }
+            #workspaceNav::item { padding: 10px 12px; margin: 1px 0; }
+            #workspaceNav::item:selected {
+                background: #0f766e;
+                color: #ffffff;
+                border-radius: 4px;
+            }
+            #workspaceTitle { color: #111827; font-size: 24px; font-weight: 700; }
+            #workspaceSubtitle { color: #4b5563; }
+            #metricFrame {
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+            }
+            #metricCaption { color: #4b5563; }
+            #metricValue { color: #111827; font-size: 22px; font-weight: 700; }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 5px;
+                padding: 8px 12px;
+            }
+            QPushButton:hover { border-color: #0f766e; }
+            QTableWidget, QListWidget {
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+            }
+            """
+        )
+
     def _create_actions(self) -> None:
         menu_bar = self.menuBar()
         if menu_bar is None:
@@ -215,6 +507,10 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._choose_job_folder)
         file_menu.addAction(open_action)
+
+        upload_action = QAction("&Upload Drawings...", self)
+        upload_action.triggered.connect(self._choose_drawing_files)
+        file_menu.addAction(upload_action)
 
         save_action = QAction("&Save As Native Job...", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
@@ -258,6 +554,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         toolbar.addAction(new_action)
         toolbar.addAction(open_action)
+        toolbar.addAction(upload_action)
         toolbar.addAction(save_action)
         toolbar.addSeparator()
 
@@ -276,6 +573,11 @@ class MainWindow(QMainWindow):
             toolbar.addAction(action)
             tools_menu.addAction(action)
         toolbar.addAction(scale_action)
+
+        finish_action = QAction("&Finish Measurement", self)
+        finish_action.triggered.connect(self._viewport.finish_active_measurement)
+        tools_menu.addAction(finish_action)
+        toolbar.addAction(finish_action)
 
         edit_library_action = QAction("&Items and Assemblies...", self)
         edit_library_action.triggered.connect(self._edit_estimate_library)
@@ -322,6 +624,16 @@ class MainWindow(QMainWindow):
         if folder:
             self.open_job_folder(folder)
 
+    def _choose_drawing_files(self) -> None:
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Upload Drawings",
+            "",
+            "Drawings (*.pdf *.tif *.tiff)",
+        )
+        if file_paths:
+            self.import_drawing_files(file_paths)
+
     def _choose_save_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Save Native Job Folder")
         if folder:
@@ -347,10 +659,38 @@ class MainWindow(QMainWindow):
         if file_path:
             self.export_pdf_report(_path_with_suffix(file_path, ".pdf"))
 
+    def _on_workspace_changed(self, index: int) -> None:
+        labels = ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports"]
+        if index < 0 or index >= len(labels):
+            return
+        self._workspace_stack.setCurrentIndex(index)
+        self._workspace_title.setText(labels[index])
+
+    def _open_document_row(self, row: int, column: int) -> None:
+        _ = column
+        if row < 0 or row >= self._page_list.count():
+            return
+        self._page_list.setCurrentRow(row)
+        self._sidebar.setCurrentRow(2)
+
+    def _run_automated_review(self) -> None:
+        if self._job is None:
+            self._show_status("Open or upload drawings before running review.")
+            return
+        review = review_job_drawings(self._job)
+        added = apply_drawing_review(self._job, review)
+        self._last_review = review
+        self._recalculate_all_measurements()
+        self._refresh_workspace()
+        self._show_status(
+            f"Automated review found {review.measurement_count} suggestions and applied {added}."
+        )
+
     def _set_job(self, job: Job) -> None:
         self._job = job
         self._current_page = None
         self._pages_by_id = {page.id: page for page in job.pages}
+        self._last_review = None
         self._undo_stack.clear()
         self._page_list.clear()
         self._measurement_list.clear()
@@ -367,6 +707,7 @@ class MainWindow(QMainWindow):
         else:
             self._viewport.set_placeholder("No pages found in this job folder.")
             self._show_status(f"Opened {job.name} with no pages.")
+        self._refresh_workspace()
 
     def _on_page_changed(
         self,
@@ -398,7 +739,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            image = render_page_to_image(page.image_path)
+            image = render_page_to_image(page.image_path, page_index=page.source_page_index)
         except PageRenderError as exc:
             LOGGER.exception("Could not render page image %s", page.image_path)
             self._viewport.set_placeholder("Page image could not be rendered.")
@@ -421,6 +762,8 @@ class MainWindow(QMainWindow):
             update={
                 "quantity": result.quantity,
                 "unit": result.unit,
+                "secondary_quantity": result.secondary_quantity,
+                "secondary_unit": result.secondary_unit,
                 "order_index": len(section.measurements),
             }
         )
@@ -455,6 +798,8 @@ class MainWindow(QMainWindow):
         self._current_page.scale_pixels_per_unit = pixel_distance / dialog.distance()
         self._current_page.scale_unit = dialog.unit()
         self._current_page.scale_units = dialog.unit()
+        self._current_page.scale_source = "manual"
+        self._recalculate_page_measurements(self._current_page)
         self._show_status(
             f"Scale set: {self._current_page.scale_pixels_per_unit:.4f} px/{dialog.unit()}."
         )
@@ -462,6 +807,7 @@ class MainWindow(QMainWindow):
     def _on_job_changed(self) -> None:
         self._refresh_measurement_panel()
         self._refresh_current_page_overlays()
+        self._refresh_workspace()
 
     def _refresh_measurement_panel(self) -> None:
         self._measurement_list.clear()
@@ -484,6 +830,139 @@ class MainWindow(QMainWindow):
             total = sum(line.total_cost for line in bom_lines)
             self._measurement_list.addItem(f"Estimated Total: ${total:.2f}")
 
+    def _refresh_workspace(self) -> None:
+        job_name = self._job.name if self._job is not None else "No job open"
+        self._workspace_subtitle.setText(job_name)
+        self._refresh_dashboard()
+        self._refresh_document_table()
+        self._refresh_review_panel()
+        self._refresh_estimate_table()
+        self._refresh_report_summary()
+
+    def _refresh_dashboard(self) -> None:
+        if self._job is None:
+            for key in ("pages", "measurements", "scaled_pages"):
+                self._metric_labels[key].setText("0")
+            self._metric_labels["estimate_total"].setText("$0.00")
+            self._dashboard_sections.setRowCount(0)
+            return
+        measurements = [
+            measurement
+            for section in self._job.takeoff_sections
+            for measurement in section.measurements
+        ]
+        scaled_pages = sum(
+            page.scale_pixels_per_unit is not None
+            or (page.scale_x is not None and page.scale_y is not None)
+            for page in self._job.pages
+        )
+        self._metric_labels["pages"].setText(str(len(self._job.pages)))
+        self._metric_labels["measurements"].setText(str(len(measurements)))
+        self._metric_labels["scaled_pages"].setText(str(scaled_pages))
+        try:
+            total = sum(line.total_cost for line in price_job(self._job))
+        except UnitConversionError:
+            total = 0.0
+        self._metric_labels["estimate_total"].setText(f"${total:.2f}")
+        self._dashboard_sections.setRowCount(len(self._job.takeoff_sections))
+        for row, section in enumerate(self._job.takeoff_sections):
+            quantity = sum(measurement.quantity or 0.0 for measurement in section.measurements)
+            unit = next(
+                (measurement.unit for measurement in section.measurements if measurement.unit), ""
+            )
+            values = [
+                section.name,
+                section.kind.value.title(),
+                str(len(section.measurements)),
+                f"{quantity:.2f} {unit}".strip(),
+            ]
+            for column, value in enumerate(values):
+                self._dashboard_sections.setItem(row, column, QTableWidgetItem(value))
+
+    def _refresh_document_table(self) -> None:
+        pages = self._job.pages if self._job is not None else []
+        self._document_table.setRowCount(len(pages))
+        for row, page in enumerate(pages):
+            source = page.image_path.name if page.image_path is not None else "Blank canvas"
+            scale = self._format_page_scale(page)
+            status = (
+                "Ready"
+                if page.image_path is not None or page.source_xml_path is None
+                else "Missing file"
+            )
+            values = [
+                page.name,
+                source,
+                str(page.source_page_index + 1),
+                scale,
+                status,
+            ]
+            for column, value in enumerate(values):
+                self._document_table.setItem(row, column, QTableWidgetItem(value))
+
+    def _refresh_review_panel(self) -> None:
+        page_reviews = self._last_review.pages if self._last_review is not None else ()
+        self._review_table.setRowCount(len(page_reviews))
+        self._review_notes.clear()
+        applied_counts = self._automated_measurement_counts()
+        for row, page_review in enumerate(page_reviews):
+            page = self._pages_by_id.get(page_review.page_id)
+            page_name = page.name if page is not None else page_review.page_id
+            scale_source = (
+                page_review.detected_scale.label
+                if page_review.detected_scale is not None
+                else "Not detected"
+            )
+            values = [
+                page_name,
+                scale_source,
+                str(len(page_review.measurements)),
+                str(applied_counts.get(page_review.page_id, 0)),
+            ]
+            for column, value in enumerate(values):
+                self._review_table.setItem(row, column, QTableWidgetItem(value))
+            for note in page_review.notes:
+                self._review_notes.addItem(f"{page_name}: {note}")
+        if not page_reviews:
+            self._review_notes.addItem(
+                "Run review after uploading drawings to generate local suggestions."
+            )
+
+    def _refresh_estimate_table(self) -> None:
+        if self._job is None:
+            self._estimate_table.setRowCount(0)
+            return
+        try:
+            lines = price_job(self._job)
+        except UnitConversionError as exc:
+            self._estimate_table.setRowCount(1)
+            self._estimate_table.setItem(0, 0, QTableWidgetItem("Pricing error"))
+            self._estimate_table.setItem(0, 1, QTableWidgetItem(str(exc)))
+            return
+        self._estimate_table.setRowCount(len(lines))
+        for row, line in enumerate(lines):
+            values = [
+                line.item_id,
+                line.description,
+                f"{line.quantity:.2f}",
+                line.unit,
+                f"${line.unit_cost:.2f}",
+                f"${line.total_cost:.2f}",
+            ]
+            for column, value in enumerate(values):
+                self._estimate_table.setItem(row, column, QTableWidgetItem(value))
+
+    def _refresh_report_summary(self) -> None:
+        if self._job is None:
+            self._report_summary.setText("Open a job before exporting reports.")
+            return
+        measurement_count = sum(len(section.measurements) for section in self._job.takeoff_sections)
+        self._report_summary.setText(
+            f"{self._job.name}: {len(self._job.pages)} pages, "
+            f"{measurement_count} measurements, "
+            f"{len(self._job.takeoff_sections)} takeoff sections ready for export."
+        )
+
     def _refresh_current_page_overlays(self) -> None:
         self._viewport.show_measurements(self._measurements_for_current_page())
 
@@ -505,7 +984,60 @@ class MainWindow(QMainWindow):
             result = calculate_measurement(measurement.kind, measurement.points, page)
             quantity = result.quantity
             unit = result.unit
-        return f"{measurement.name}: {quantity:.2f} {unit}"
+        formatted = f"{measurement.name}: {quantity:.2f} {unit}"
+        if measurement.secondary_quantity is not None and measurement.secondary_unit is not None:
+            formatted += (
+                f" | perimeter {measurement.secondary_quantity:.2f} {measurement.secondary_unit}"
+            )
+        if measurement.source != "manual" and measurement.confidence is not None:
+            formatted += f" | {measurement.source} {measurement.confidence:.0%}"
+        return formatted
+
+    def _recalculate_page_measurements(self, page: Page) -> None:
+        for section in self._job.takeoff_sections if self._job is not None else []:
+            for measurement in section.measurements:
+                if measurement.page_id != page.id:
+                    continue
+                result = calculate_measurement(measurement.kind, measurement.points, page)
+                measurement.quantity = result.quantity
+                measurement.unit = result.unit
+                measurement.secondary_quantity = result.secondary_quantity
+                measurement.secondary_unit = result.secondary_unit
+        self._on_job_changed()
+
+    def _recalculate_all_measurements(self) -> None:
+        if self._job is None:
+            return
+        for page in self._job.pages:
+            for section in self._job.takeoff_sections:
+                for measurement in section.measurements:
+                    if measurement.page_id != page.id:
+                        continue
+                    result = calculate_measurement(measurement.kind, measurement.points, page)
+                    measurement.quantity = result.quantity
+                    measurement.unit = result.unit
+                    measurement.secondary_quantity = result.secondary_quantity
+                    measurement.secondary_unit = result.secondary_unit
+        self._refresh_measurement_panel()
+        self._refresh_current_page_overlays()
+
+    def _automated_measurement_counts(self) -> dict[str, int]:
+        if self._job is None:
+            return {}
+        counts: dict[str, int] = {}
+        for section in self._job.takeoff_sections:
+            for measurement in section.measurements:
+                if measurement.source != "automated-review" or measurement.page_id is None:
+                    continue
+                counts[measurement.page_id] = counts.get(measurement.page_id, 0) + 1
+        return counts
+
+    def _format_page_scale(self, page: Page) -> str:
+        if page.scale_pixels_per_unit is not None and page.scale_unit is not None:
+            return f"{page.scale_pixels_per_unit:.4f} px/{page.scale_unit}"
+        if page.scale_x is not None and page.scale_y is not None and page.scale_units is not None:
+            return f"{page.scale_x:.4f} x {page.scale_y:.4f} px/{page.scale_units}"
+        return "Unscaled"
 
     def _show_status(self, message: str) -> None:
         status_bar = self.statusBar()

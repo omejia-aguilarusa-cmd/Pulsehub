@@ -56,6 +56,10 @@ class Measurement(BaseModel):
     points: list[Point] = Field(default_factory=list)
     quantity: float | None = None
     unit: str | None = None
+    secondary_quantity: float | None = None
+    secondary_unit: str | None = None
+    source: str = "manual"
+    confidence: float | None = None
     source_xml_path: Path | None = None
     raw_properties: dict[str, LegacyProperty] = Field(default_factory=dict)
 
@@ -89,11 +93,13 @@ class Page(BaseModel):
     order_index: int | None = None
     image_guid: str | None = None
     image_path: Path | None = None
+    source_page_index: int = 0
     scale_x: float | None = None
     scale_y: float | None = None
     scale_units: str | None = None
     scale_pixels_per_unit: float | None = None
     scale_unit: str | None = None
+    scale_source: str | None = None
     canvas_width: int = 1600
     canvas_height: int = 1000
     measurement_type: str | None = None

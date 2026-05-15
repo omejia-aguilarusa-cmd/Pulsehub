@@ -53,3 +53,22 @@ def test_calculate_measurement_supports_metric_and_unknown_units() -> None:
     assert raw.quantity == 5
     assert raw.unit == "PX"
     assert unknown.quantity == 0
+
+
+def test_calculate_measurement_respects_asymmetric_imported_scale() -> None:
+    page = Page(id="legacy", name="Legacy", scale_x=10, scale_y=20, scale_units="FT")
+
+    length = calculate_measurement(
+        MeasurementKind.LENGTH,
+        [Point(x=0, y=0), Point(x=30, y=80)],
+        page,
+    )
+    area = calculate_measurement(
+        MeasurementKind.AREA,
+        [Point(x=0, y=0), Point(x=100, y=0), Point(x=100, y=40), Point(x=0, y=40)],
+        page,
+    )
+
+    assert length.quantity == 5
+    assert area.quantity == 20
+    assert area.secondary_quantity == 24
