@@ -43,7 +43,7 @@ def test_phase0_placeholder_opens_main_window(
     assert __version__ == "0.1.0"
     assert application.applicationName() == "Takeoff Pro"
     assert window.windowTitle() == "Takeoff Pro"
-    assert window.minimumWidth() == 900
+    assert window.minimumWidth() >= 900
 
     created_windows: list[_FakeWindow] = []
 

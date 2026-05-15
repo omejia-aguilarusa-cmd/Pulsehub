@@ -18,10 +18,27 @@ from takeoff_pro.data.models import Job, Measurement, MeasurementKind, Page, Poi
 
 LOGGER = logging.getLogger(__name__)
 _MIN_CONFIDENCE = 0.55
+
+# Pattern 1 \u2013 architectural:  1/4" = 1'-0"  or  3/4" = 1'  or  1" = 10'
 _SCALE_PATTERN = re.compile(
-    r"(?P<drawing>\d+(?:\s+\d+/\d+|/\d+)?)\s*[\"\u201d]?\s*=\s*"
-    r"(?P<feet>\d+(?:\.\d+)?)\s*['\u2019]"
-    r"(?:\s*-\s*(?P<inches>\d+(?:\s+\d+/\d+|/\d+)?)\s*[\"\u201d]?)?",
+    r"(?P<drawing>\d+(?:\s*\d+/\d+|/\d+)?)\s*[\"''\u201d]?\s*=\s*"
+    r"(?P<feet>\d+(?:\.\d+)?)\s*['''\u2019\u2018]"
+    r"(?:\s*[-\u2013]\s*(?P<inches>\d+(?:\s*\d+/\d+|/\d+)?)\s*[\"''\u201d]?)?",
+    re.IGNORECASE,
+)
+
+# Pattern 2 \u2013 metric ratio:  1:100  or  1 : 50
+_RATIO_PATTERN = re.compile(
+    r"\b1\s*:\s*(?P<ratio>\d+(?:\.\d+)?)\b",
+)
+
+# Pattern 3 \u2013 written form:  SCALE 1/4" = 1'-0"  or  Scale: 1"=10'
+_SCALE_LABEL_PATTERN = re.compile(
+    r"(?:scale|sc\.?)\s*:?\s*"
+    r"(?P<drawing>\d+(?:\s*\d+/\d+|/\d+)?)\s*[\"''\u201d]?\s*=\s*"
+    r"(?P<feet>\d+(?:\.\d+)?)\s*['''\u2019]"
+    r"(?:\s*[-\u2013]\s*(?P<inches>\d+(?:\s*\d+/\d+|/\d+)?)\s*[\"''\u201d]?)?",
+    re.IGNORECASE,
 )
 
 
@@ -217,22 +234,67 @@ def _review_page(page: Page, *, max_measurements_per_page: int) -> PageReview:
 
 
 def _detect_scale(source_page: _PageLike) -> DetectedScale | None:
+    """Try multiple strategies to find the drawing scale."""
     try:
         text = str(source_page.get_text("text"))
     except Exception:
         LOGGER.warning("Could not extract page text during automated review.", exc_info=True)
         return None
-    match = _SCALE_PATTERN.search(text)
+
+    # Strategy 1: explicit "Scale: ..." label (highest priority)
+    result = _try_architectural_match(_SCALE_LABEL_PATTERN, text, prefix="scale label")
+    if result is not None:
+        return result
+
+    # Strategy 2: bare architectural notation  1/4" = 1'-0"
+    result = _try_architectural_match(_SCALE_PATTERN, text, prefix="scale note")
+    if result is not None:
+        return result
+
+    # Strategy 3: metric ratio  1:100
+    result = _try_ratio_match(text)
+    if result is not None:
+        return result
+
+    return None
+
+
+def _try_architectural_match(pattern: re.Pattern[str], text: str, *, prefix: str) -> DetectedScale | None:
+    """Parse an architectural scale match into a DetectedScale."""
+    match = pattern.search(text)
     if match is None:
         return None
     drawing_inches = _mixed_number(match.group("drawing"))
     real_feet = float(match.group("feet")) + (_mixed_number(match.group("inches")) / 12.0)
     if drawing_inches <= 0 or real_feet <= 0:
         return None
+    # PDF points are 72 per inch; pixels_per_unit = PDF-points per real foot
+    pixels_per_unit = (72.0 * drawing_inches) / real_feet
     return DetectedScale(
-        pixels_per_unit=(72.0 * drawing_inches) / real_feet,
+        pixels_per_unit=pixels_per_unit,
         unit="FT",
-        label=f"detected PDF scale note {match.group(0).strip()}",
+        label=f"detected {prefix} {match.group(0).strip()!r}",
+    )
+
+
+def _try_ratio_match(text: str) -> DetectedScale | None:
+    """Parse a metric ratio scale (1:100 → 1 mm drawing = 100 mm real)."""
+    match = _RATIO_PATTERN.search(text)
+    if match is None:
+        return None
+    ratio = float(match.group("ratio"))
+    if ratio <= 0:
+        return None
+    # 1 PDF point = 1/72 inch = 25.4/72 mm ≈ 0.353 mm
+    # drawing unit = 1 PDF point = 0.353 mm of real drawing
+    # real unit = 0.353 mm * ratio (in mm), converted to metres
+    real_metres = (25.4 / 72.0) * ratio / 1000.0
+    pixels_per_metre = 1.0 / real_metres  # PDF points per real metre
+    pixels_per_unit = pixels_per_metre  # we'll report unit="M"
+    return DetectedScale(
+        pixels_per_unit=pixels_per_unit,
+        unit="M",
+        label=f"detected metric ratio 1:{ratio:.0f}",
     )
 
 
@@ -346,13 +408,34 @@ def _axis_aligned_segment(start: Point, end: Point, *, confidence: float) -> _Se
 
 
 def _raster_segments(source_page: _PageLike) -> list[_Segment]:
-    pixmap = source_page.get_pixmap(colorspace=pymupdf.csGRAY, alpha=False)
+    # Render at 2× for better line detection on low-DPI PDFs
+    try:
+        import pymupdf as fitz  # type: ignore[import-untyped]
+        matrix = fitz.Matrix(2.0, 2.0)
+        pixmap = source_page.get_pixmap(matrix=matrix, colorspace=fitz.csGRAY, alpha=False)
+    except Exception:
+        pixmap = source_page.get_pixmap(colorspace=pymupdf.csGRAY, alpha=False)
+
     gray = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width)
-    mask = gray < 160
-    min_run = max(24, round(max(pixmap.width, pixmap.height) * 0.08))
+    # Adaptive threshold: use Otsu-like cutoff rather than fixed 160
+    threshold = int(np.percentile(gray, 15))
+    threshold = max(60, min(threshold, 180))
+    mask = gray < threshold
+    # Minimum run length: at least 5% of the page dimension, minimum 30px at 2×
+    min_run = max(30, round(max(pixmap.width, pixmap.height) * 0.05))
     segments = _scan_runs(mask, min_run=min_run, horizontal=True)
     segments.extend(_scan_runs(mask, min_run=min_run, horizontal=False))
-    return _deduplicate_segments(segments)
+    # Scale points back to 1× PDF-point space
+    scaled = [
+        _Segment(
+            s.orientation,
+            Point(x=s.start.x / 2.0, y=s.start.y / 2.0),
+            Point(x=s.end.x / 2.0, y=s.end.y / 2.0),
+            s.confidence,
+        )
+        for s in segments
+    ]
+    return _deduplicate_segments(scaled)
 
 
 def _scan_runs(

@@ -23,6 +23,10 @@ hiddenimports = [
     "numpy._core.umath",
     "shapely",
     "shapely.lib",
+    "takeoff_pro.ui.ai_worker",
+    "PIL",
+    "PIL.Image",
+    "PIL.TiffImagePlugin",
 ]
 
 

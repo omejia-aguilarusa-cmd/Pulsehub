@@ -65,6 +65,9 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
 
     try:
         pages: list[Page] = []
+        # For TIFF files, read DPI metadata once for all pages in the file.
+        tiff_dpi = _tiff_dpi(source_path) if source_path.suffix.casefold() in {".tif", ".tiff"} else None
+
         for page_index in range(document.page_count):
             source_page = document.load_page(page_index)
             page_number = page_index + 1
@@ -73,6 +76,16 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
                 if document.page_count == 1
                 else f"{source_path.stem} - Page {page_number}"
             )
+            # Seed scale from TIFF DPI so geometry calculations are accurate
+            # for scanned drawings even before the AI review runs.
+            scale_pixels_per_unit: float | None = None
+            scale_unit: str | None = None
+            scale_source: str | None = None
+            if tiff_dpi is not None and tiff_dpi > 0:
+                scale_pixels_per_unit = tiff_dpi
+                scale_unit = "IN"
+                scale_source = f"TIFF DPI metadata ({tiff_dpi:.0f} dpi)"
+
             pages.append(
                 Page(
                     id=str(uuid4()),
@@ -82,8 +95,27 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
                     source_page_index=page_index,
                     canvas_width=max(1, round(source_page.rect.width)),
                     canvas_height=max(1, round(source_page.rect.height)),
+                    scale_pixels_per_unit=scale_pixels_per_unit,
+                    scale_unit=scale_unit,
+                    scale_units=scale_unit,
+                    scale_source=scale_source,
                 )
             )
         return pages
     finally:
         document.close()
+
+
+def _tiff_dpi(path: Path) -> float | None:
+    """Return the horizontal DPI from a TIFF file, or None if unavailable."""
+    try:
+        from PIL import Image  # type: ignore[import-untyped]
+
+        with Image.open(str(path)) as img:
+            dpi_info = img.info.get("dpi")
+            if isinstance(dpi_info, tuple) and len(dpi_info) >= 1:
+                val = float(dpi_info[0])
+                return val if val > 0 else None
+    except Exception:
+        LOGGER.debug("Could not read TIFF DPI from %s", path, exc_info=True)
+    return None
