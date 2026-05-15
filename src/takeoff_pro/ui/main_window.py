@@ -65,6 +65,7 @@ from takeoff_pro.reports import export_csv, export_pdf, export_xlsx
 from takeoff_pro.ui.ai_worker import AIAnalysisWorker
 from takeoff_pro.ui.commands import AddMeasurementCommand
 from takeoff_pro.ui.estimate_dialog import EstimateEditorDialog
+from takeoff_pro.ui.estimator_panel import EstimatorPanel
 from takeoff_pro.ui.scale_dialog import ScaleCalibrationDialog
 from takeoff_pro.ui.viewport import PageViewport
 
@@ -512,7 +513,7 @@ class MainWindow(QMainWindow):
 
         # Nav list
         self._sidebar.setObjectName("workspaceNav")
-        nav_items = ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports"]
+        nav_items = ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports", "Estimator"]
         self._sidebar.addItems(nav_items)
         layout.addWidget(self._sidebar, 1)
 
@@ -594,6 +595,8 @@ class MainWindow(QMainWindow):
         self._workspace_stack.addWidget(self._build_review_page())      # 3
         self._workspace_stack.addWidget(self._build_estimate_page())    # 4
         self._workspace_stack.addWidget(self._build_reports_page())     # 5
+        self._estimator_panel = EstimatorPanel(self)
+        self._workspace_stack.addWidget(self._estimator_panel)          # 6
         layout.addWidget(self._workspace_stack, 1)
         return container
 
@@ -1411,7 +1414,7 @@ class MainWindow(QMainWindow):
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def _on_workspace_changed(self, index: int) -> None:
-        titles = ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports"]
+        titles = ["Dashboard", "Documents", "Takeoff", "AI Review", "Estimate", "Reports", "Estimator"]
         if 0 <= index < len(titles):
             self._workspace_stack.setCurrentIndex(index)
             self._workspace_title.setText(titles[index])
