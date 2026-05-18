@@ -1,297 +1,89 @@
-"""
-Estimator workspace panel — PulseHubX web UI embedded via QWebEngineView.
-
-Loads the self-contained AI Takeoff Estimator HTML prototype and bridges it to
-the Python analysis backend:
-  • Drag-and-drop / native file picker → EstimatorAnalysisWorker
-  • Analysis progress → shows the 'analysis' screen in the web UI
-  • Analysis complete → injects real data via window.__injectReport()
-  • Falls back to the Qt-widget EstimatorPanel if WebEngine is unavailable.
-"""
+"""Embedded web workspace host for the production Takeoff UI."""
 
 from __future__ import annotations
 
-import json
+import logging
+import sys
 from pathlib import Path
-from typing import Optional
 
 from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
-from PyQt6.QtWidgets import QFileDialog, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 try:
     from PyQt6.QtWebEngineCore import QWebEngineSettings
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 
     _HAS_WEBENGINE = True
-except ImportError:
+except ImportError:  # pragma: no cover - import guard for systems without WebEngine
     _HAS_WEBENGINE = False
 
-from takeoff_pro.estimator.document_classifier import DocumentRelevance
-from takeoff_pro.estimator.project_analyzer import ProjectAnalysisReport
-from takeoff_pro.ui.estimator_worker import EstimatorAnalysisWorker
+LOGGER = logging.getLogger(__name__)
 
-import sys as _sys
-
-if getattr(_sys, "frozen", False):
-    # PyInstaller single-file: data files are in sys._MEIPASS
-    _ASSETS_DIR = Path(getattr(_sys, "_MEIPASS", "")) / "takeoff_pro" / "ui" / "assets"
+if getattr(sys, "frozen", False):
+    _ASSETS_DIR = Path(getattr(sys, "_MEIPASS", "")) / "takeoff_pro" / "ui" / "assets"
 else:
     _ASSETS_DIR = Path(__file__).parent / "assets"
 
 _UI_HTML = _ASSETS_DIR / "estimator_ui.html"
 
-# Injected once after page load: wires native file-picker into the web UI.
-_BRIDGE_JS = """
-(function() {
-  if (window.__pytakoff_patched) return;
-  window.__pytakoff_patched = true;
-
-  /* Intercept "Choose files" / "Import from Drive" clicks */
-  document.addEventListener('click', function(e) {
-    var btn = e.target.closest && e.target.closest('button');
-    if (!btn) return;
-    var txt = btn.textContent.trim();
-    if (txt === 'Choose files' || txt === 'Import from Drive' || txt === 'Connect Gmail · Bid invites') {
-      e.stopPropagation();
-      e.preventDefault();
-      window.location.href = 'qtbridge://openfiles';
-    }
-  }, true);
-
-  /* Override default drag-drop in the upload zone so Qt widget level still fires */
-  document.addEventListener('dragover',  function(e) { e.stopPropagation(); }, true);
-  document.addEventListener('drop',      function(e) { e.stopPropagation(); }, true);
-})();
-"""
-
 
 class EstimatorWebPanel(QWidget):
-    """Full estimator workspace — PulseHubX web UI + Python analysis backend."""
+    """Full-height web workspace without any duplicated native shell UI."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the embedded web workspace."""
         super().__init__(parent)
-        self._worker: EstimatorAnalysisWorker | None = None
-        self._view: Optional[QWebEngineView] = None
-        self.setAcceptDrops(True)
+        self._view: QWebEngineView | None = None
         self._build()
-
-    # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Try to load the web UI; fall back to the Qt-widget panel on any failure.
+        load_error = self._load_error()
+        if load_error:
+            self._show_fallback(layout, load_error)
+            return
+
         try:
-            if not _HAS_WEBENGINE:
-                raise RuntimeError("PyQt6-WebEngine not available")
-            if not _UI_HTML.exists():
-                raise FileNotFoundError(f"estimator_ui.html not found at: {_UI_HTML}")
-
-            self._view = QWebEngineView()
-            page = self._view.page()
-            if page is None:
-                raise RuntimeError("QWebEnginePage could not be created")
-
-            # Signal connections wrapped individually so a missing signal doesn't kill everything
-            try:
-                page.navigationRequested.connect(self._on_navigation)
-            except AttributeError:
-                pass
-            page.loadFinished.connect(self._on_page_loaded)
-
-            s = page.settings()
-            if s:
-                s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-                s.setAttribute(
-                    QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
-                )
-
-            # Load HTML bytes directly — avoids any file:// URL origin quirks in the
-            # frozen exe while still giving the page a correct base URL for blob creation.
-            html_bytes = _UI_HTML.read_bytes()
+            self._view = QWebEngineView(self)
+            settings = self._view.settings()
+            if settings is None:
+                self._show_fallback(layout, "Workspace browser settings are unavailable.")
+                return
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls,
+                True,
+            )
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
+                True,
+            )
             self._view.setContent(
-                html_bytes,
+                _UI_HTML.read_bytes(),
                 "text/html; charset=utf-8",
                 QUrl.fromLocalFile(str(_UI_HTML)),
             )
             layout.addWidget(self._view)
+        except Exception as exc:
+            LOGGER.exception("Could not load workspace UI")
+            self._show_fallback(layout, str(exc))
 
-        except Exception as exc:  # noqa: BLE001
-            # Log the reason and show the Qt-widget fallback
-            import logging
-            logging.getLogger(__name__).warning(
-                "EstimatorWebPanel falling back to Qt widgets: %s", exc
-            )
-            from takeoff_pro.ui.estimator_panel import EstimatorPanel
-            fallback = EstimatorPanel(self)
-            layout.addWidget(fallback)
+    def _load_error(self) -> str | None:
+        """Return a user-facing setup error before creating the browser view."""
+        if not _HAS_WEBENGINE:
+            return "PyQt6-WebEngine is not available."
+        if not _UI_HTML.exists():
+            return f"Workspace HTML not found: {_UI_HTML}"
+        return None
 
-    # ── Page events ───────────────────────────────────────────────────────────
-
-    def _on_page_loaded(self, ok: bool) -> None:
-        if not ok or self._view is None:
-            return
-        self._view.page().runJavaScript(_BRIDGE_JS)
-
-    def _on_navigation(self, request: object) -> None:
-        """Intercept 'qtbridge://openfiles' navigation → native file picker."""
-        # QWebEngineNavigationRequest has .url and .action
-        try:
-            url   = request.url()  # type: ignore[attr-defined]
-            if url.scheme() == "qtbridge" and url.host() == "openfiles":
-                request.reject()  # type: ignore[attr-defined]
-                self._open_native_file_picker()
-        except Exception:
-            pass
-
-    # ── File picking ──────────────────────────────────────────────────────────
-
-    def _open_native_file_picker(self) -> None:
-        paths_str, _ = QFileDialog.getOpenFileNames(
+    def _show_fallback(self, layout: QVBoxLayout, detail: str) -> None:
+        """Render a readable fallback when the embedded workspace cannot load."""
+        fallback = QLabel(
+            f"The Takeoff workspace could not be loaded. {detail}",
             self,
-            "Select Project Files",
-            "",
-            "Estimates, Takeoffs & Drawings (*.pdf *.xlsx *.xls *.docx *.txt *.csv)",
         )
-        if paths_str:
-            self._run_analysis([Path(p) for p in paths_str])
-
-    # ── Drag-and-drop ─────────────────────────────────────────────────────────
-
-    def dragEnterEvent(self, event: QDragEnterEvent | None) -> None:
-        if event and event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        elif event:
-            event.ignore()
-
-    def dropEvent(self, event: QDropEvent | None) -> None:
-        if event is None:
-            return
-        mime = event.mimeData()
-        if not mime.hasUrls():
-            return
-        paths: list[Path] = []
-        for url in mime.urls():
-            p = Path(url.toLocalFile())
-            if p.is_file():
-                paths.append(p)
-            elif p.is_dir():
-                paths.extend(
-                    f for f in p.rglob("*")
-                    if f.is_file()
-                    and f.suffix.lower() in {".pdf", ".xlsx", ".xls", ".docx", ".txt"}
-                )
-        if paths:
-            event.acceptProposedAction()
-            self._run_analysis(paths)
-
-    # ── Analysis pipeline ─────────────────────────────────────────────────────
-
-    def _run_analysis(self, paths: list[Path]) -> None:
-        if self._worker and self._worker.isRunning():
-            return
-        if self._view:
-            self._view.page().runJavaScript(
-                "window.__setScreen && window.__setScreen('analysis');"
-            )
-        worker = EstimatorAnalysisWorker(paths)
-        worker.finished.connect(self._on_finished)
-        worker.error.connect(self._on_error)
-        self._worker = worker
-        worker.start()
-
-    def _on_finished(self, report: object) -> None:
-        self._worker = None
-        if not isinstance(report, ProjectAnalysisReport):
-            return
-        if self._view:
-            payload = json.dumps(_report_to_js(report))
-            self._view.page().runJavaScript(
-                f"window.__injectReport && window.__injectReport({payload});"
-            )
-
-    def _on_error(self, _msg: str) -> None:
-        self._worker = None
-        if self._view:
-            self._view.page().runJavaScript(
-                "window.__setScreen && window.__setScreen('upload');"
-            )
-
-
-# ── Report → JS data model ────────────────────────────────────────────────────
-
-def _report_to_js(r: ProjectAnalysisReport) -> dict:  # noqa: C901
-    """Map a ProjectAnalysisReport to the window globals the React app reads."""
-    conf_pct = {"high": 88, "medium": 64, "low": 32}.get(r.confidence, 50)
-    dw_fmt   = f"${r.drywall_price:,.0f}"  if r.drywall_price  else "—"
-    pt_fmt   = f"${r.paint_price:,.0f}"    if r.paint_price    else "—"
-    tot_fmt  = f"${r.total_price:,.0f}"    if r.total_price    else "—"
-
-    # ── PROJECT ───────────────────────────────────────────────────────────
-    project = {
-        "name":       r.project_name or "Untitled Project",
-        "client":     "—",
-        "address":    "—",
-        "type":       "Construction · Division 09",
-        "drawingSet": "—",
-        "addenda":    [],
-        "sheets":     len(r.documents),
-        "bidDue":     "—",
-        "status":     "AI Draft · Awaiting Estimator Review",
-        "confidence": conf_pct,
-    }
-
-    # ── SHEETS (document register) ────────────────────────────────────────
-    _rel_status = {
-        DocumentRelevance.RELEVANT:   "ok",
-        DocumentRelevance.SUPPORTING: "warn",
-        DocumentRelevance.IGNORE:     "ok",
-    }
-    sheets = [
-        {
-            "id":    doc.path.stem[:12],
-            "title": doc.path.name,
-            "disc":  str(doc.doc_type).split(".")[-1].replace("_", " ").title(),
-            "date":  "—",
-            "rev":   "—",
-            "add":   "—",
-            "status": _rel_status.get(doc.relevance, "ok"),
-            "conf":  int(doc.classifier_confidence * 100),
-        }
-        for doc in r.documents
-    ] or [{"id": "—", "title": "No documents", "disc": "—",
-            "date": "—", "rev": "—", "add": "—", "status": "warn", "conf": 0}]
-
-    # ── NEXT_ACTIONS ──────────────────────────────────────────────────────
-    actions: list[dict] = []
-    if r.drywall_price or r.paint_price or r.total_price:
-        actions.append({
-            "type":  "ok",
-            "title": f"{r.project_name or 'Project'} — analysis complete",
-            "body":  f"Drywall: {dw_fmt}  ·  Paint: {pt_fmt}  ·  Total: {tot_fmt}  ·  Confidence: {r.confidence}",
-            "cta":   "View takeoff",
-        })
-    _sev = {"critical": "risk", "high": "risk", "medium": "warn", "low": "info"}
-    for flag in (r.qc_flags or [])[:4]:
-        actions.append({
-            "type":  _sev.get(flag.severity, "info"),
-            "title": flag.description[:60],
-            "body":  flag.recommendation[:100],
-            "cta":   "Review",
-        })
-    if not actions:
-        actions.append({
-            "type":  "info",
-            "title": "Analysis complete — no confirmed pricing found",
-            "body":  "Upload estimate PDFs (bid proposals, quotes) to extract drywall and paint prices.",
-            "cta":   "Upload more files",
-        })
-
-    return {
-        "PROJECT":      project,
-        "SHEETS":       sheets,
-        "NEXT_ACTIONS": actions,
-    }
+        fallback.setWordWrap(True)
+        layout.addWidget(fallback)

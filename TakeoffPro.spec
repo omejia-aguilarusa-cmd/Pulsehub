@@ -13,10 +13,13 @@ from PyInstaller.utils.hooks import (
 
 project_root = Path.cwd()
 
-# Bundle the PulseHubX estimator web UI alongside the executable
+# Bundle the single-workspace web UI alongside the executable.
 _assets_src = project_root / "src" / "takeoff_pro" / "ui" / "assets"
 datas = [
     (str(_assets_src / "estimator_ui.html"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "workspace_styles.css"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "workspace_logic.js"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "workspace_app.js"), "takeoff_pro/ui/assets"),
 ]
 binaries = []
 hiddenimports = [
