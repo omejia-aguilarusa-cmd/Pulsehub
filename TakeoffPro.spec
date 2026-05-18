@@ -64,19 +64,55 @@ hiddenimports += collect_submodules("numpy.random", filter=include_runtime_modul
 hiddenimports += collect_submodules("shapely", filter=include_runtime_module)
 datas += collect_data_files("reportlab")
 
-# PyQt6-WebEngine: collect Qt WebEngine process binary and resources
+# PyQt6-WebEngine: manually collect DLLs, process binary, and resources.
+# collect_all("PyQt6.QtWebEngineWidgets") returns nothing because it's a module,
+# not a package — the real binaries live inside PyQt6/Qt6/bin/.
 try:
-    _we_datas, _we_bins, _we_hidden = collect_all("PyQt6.QtWebEngineWidgets")
-    datas    += _we_datas
-    binaries += _we_bins
-    hiddenimports += _we_hidden
-    _wec_datas, _wec_bins, _wec_hidden = collect_all("PyQt6.QtWebEngineCore")
-    datas    += _wec_datas
-    binaries += _wec_bins
-    hiddenimports += _wec_hidden
-    datas += collect_data_files("PyQt6", includes=["**/QtWebEngine*", "**/resources/**", "**/translations/**"])
-except Exception:
-    pass  # WebEngine not installed — skip
+    import PyQt6 as _pyqt6
+    _pyqt6_dir = Path(_pyqt6.__file__).parent
+    _qt6_bin   = _pyqt6_dir / "Qt6" / "bin"
+    _qt6_res   = _pyqt6_dir / "Qt6" / "resources"
+    _qt6_loc   = _pyqt6_dir / "Qt6" / "translations"
+
+    # Core WebEngine DLLs + renderer process
+    for _dll_name in [
+        "Qt6WebEngineCore.dll",
+        "Qt6WebEngineWidgets.dll",
+        "Qt6WebEngineQuick.dll",
+        "QtWebEngineProcess.exe",
+    ]:
+        _dll_path = _qt6_bin / _dll_name
+        if _dll_path.exists():
+            binaries.append((str(_dll_path), "PyQt6/Qt6/bin"))
+
+    # Resource paks (icudtl.dat comes from Qt6Core, already collected)
+    if _qt6_res.exists():
+        for _f in _qt6_res.glob("qtwebengine*"):
+            datas.append((str(_f), "PyQt6/Qt6/resources"))
+
+    # WebEngine locales
+    _we_loc = _qt6_loc / "qtwebengine_locales"
+    if _we_loc.exists():
+        datas.append((str(_we_loc), "PyQt6/Qt6/translations/qtwebengine_locales"))
+
+    # PyQt6 .pyd bindings for WebEngine
+    for _pyd_name in [
+        "QtWebEngineCore.pyd",
+        "QtWebEngineWidgets.pyd",
+        "QtWebEngineQuick.pyd",
+    ]:
+        _pyd = _pyqt6_dir / _pyd_name
+        if _pyd.exists():
+            binaries.append((str(_pyd), "PyQt6"))
+
+    hiddenimports += [
+        "PyQt6.QtWebEngineWidgets",
+        "PyQt6.QtWebEngineCore",
+        "PyQt6.QtWebEngineQuick",
+        "PyQt6.QtWebChannel",
+    ]
+except Exception as _e:
+    print(f"WARNING: WebEngine collection failed: {_e}")  # noqa: T201
 
 a = Analysis(
     [str(project_root / "src" / "takeoff_pro" / "__main__.py")],
@@ -86,7 +122,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(project_root / "webengine_runtime_hook.py")],
     excludes=[],
     noarchive=False,
     optimize=0,

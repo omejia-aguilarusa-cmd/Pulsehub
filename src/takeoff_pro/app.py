@@ -6,6 +6,7 @@ import logging
 import sys
 from collections.abc import Sequence
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from takeoff_pro.ui.main_window import MainWindow
@@ -31,6 +32,9 @@ def create_application(argv: Sequence[str] | None = None) -> QApplication:
             return existing_app
         msg = "An incompatible Qt application instance is already running."
         raise RuntimeError(msg)
+
+    # Required for Qt WebEngine on Windows (must be set before QApplication)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
     args = list(argv) if argv is not None else sys.argv
     app = QApplication(args)

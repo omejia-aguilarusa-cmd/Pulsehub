@@ -31,8 +31,15 @@ from takeoff_pro.estimator.document_classifier import DocumentRelevance
 from takeoff_pro.estimator.project_analyzer import ProjectAnalysisReport
 from takeoff_pro.ui.estimator_worker import EstimatorAnalysisWorker
 
-_ASSETS_DIR = Path(__file__).parent / "assets"
-_UI_HTML    = _ASSETS_DIR / "estimator_ui.html"
+import sys as _sys
+
+if getattr(_sys, "frozen", False):
+    # PyInstaller single-file: data files are in sys._MEIPASS
+    _ASSETS_DIR = Path(getattr(_sys, "_MEIPASS", "")) / "takeoff_pro" / "ui" / "assets"
+else:
+    _ASSETS_DIR = Path(__file__).parent / "assets"
+
+_UI_HTML = _ASSETS_DIR / "estimator_ui.html"
 
 # Injected once after page load: wires native file-picker into the web UI.
 _BRIDGE_JS = """
@@ -76,24 +83,49 @@ class EstimatorWebPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        if _HAS_WEBENGINE and _UI_HTML.exists():
+        # Try to load the web UI; fall back to the Qt-widget panel on any failure.
+        try:
+            if not _HAS_WEBENGINE:
+                raise RuntimeError("PyQt6-WebEngine not available")
+            if not _UI_HTML.exists():
+                raise FileNotFoundError(f"estimator_ui.html not found at: {_UI_HTML}")
+
             self._view = QWebEngineView()
             page = self._view.page()
-            if page:
-                page.navigationRequested.connect(self._on_navigation)
-                page.loadFinished.connect(self._on_page_loaded)
-                s = page.settings()
-                if s:
-                    s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-                    s.setAttribute(
-                        QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
-                    )
-            self._view.load(QUrl.fromLocalFile(str(_UI_HTML)))
-            layout.addWidget(self._view)
-        else:
-            # Graceful fallback — Qt-widget estimator panel
-            from takeoff_pro.ui.estimator_panel import EstimatorPanel
+            if page is None:
+                raise RuntimeError("QWebEnginePage could not be created")
 
+            # Signal connections wrapped individually so a missing signal doesn't kill everything
+            try:
+                page.navigationRequested.connect(self._on_navigation)
+            except AttributeError:
+                pass
+            page.loadFinished.connect(self._on_page_loaded)
+
+            s = page.settings()
+            if s:
+                s.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+                s.setAttribute(
+                    QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+                )
+
+            # Load HTML bytes directly — avoids any file:// URL origin quirks in the
+            # frozen exe while still giving the page a correct base URL for blob creation.
+            html_bytes = _UI_HTML.read_bytes()
+            self._view.setContent(
+                html_bytes,
+                "text/html; charset=utf-8",
+                QUrl.fromLocalFile(str(_UI_HTML)),
+            )
+            layout.addWidget(self._view)
+
+        except Exception as exc:  # noqa: BLE001
+            # Log the reason and show the Qt-widget fallback
+            import logging
+            logging.getLogger(__name__).warning(
+                "EstimatorWebPanel falling back to Qt widgets: %s", exc
+            )
+            from takeoff_pro.ui.estimator_panel import EstimatorPanel
             fallback = EstimatorPanel(self)
             layout.addWidget(fallback)
 
