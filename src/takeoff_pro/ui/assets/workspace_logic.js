@@ -23,6 +23,10 @@
     "buildings",
     "scopes",
     "scopeDetections",
+    "drawingMeasurements",
+    "drawingIssues",
+    "drawingScaleCalibrations",
+    "drawingRevisionReviews",
     "takeoffMeasurements",
     "estimateLineItems",
     "rfis",
@@ -70,6 +74,10 @@
       buildings: [],
       scopes: [],
       scopeDetections: [],
+      drawingMeasurements: [],
+      drawingIssues: [],
+      drawingScaleCalibrations: [],
+      drawingRevisionReviews: [],
       takeoffMeasurements: [],
       materials: [],
       estimateLineItems: [],
@@ -95,6 +103,10 @@
       "buildings",
       "scopes",
       "scopeDetections",
+      "drawingMeasurements",
+      "drawingIssues",
+      "drawingScaleCalibrations",
+      "drawingRevisionReviews",
       "takeoffMeasurements",
       "materials",
       "estimateLineItems",
@@ -263,6 +275,8 @@
       ["floor", state.floors, ["name"]],
       ["building", state.buildings, ["name"]],
       ["scope", state.scopes, ["name", "category"]],
+      ["drawing-measurement", state.drawingMeasurements, ["label", "category", "status", "calculationSummary"]],
+      ["drawing-issue", state.drawingIssues, ["title", "description", "status", "severity"]],
       ["takeoff", state.takeoffMeasurements, ["name", "scopeName", "notes"]],
       ["estimate", state.estimateLineItems, ["description", "unit"]],
       ["rfi", state.rfis, ["title", "question", "answer"]],
@@ -282,7 +296,7 @@
           .join(" ")
           .toLowerCase();
         if (text.includes(needle)) {
-          result.push({ type, id: row.id, label: firstNonEmpty(row.name, row.title, row.description, row.fileName), row });
+          result.push({ type, id: row.id, label: firstNonEmpty(row.name, row.label, row.title, row.description, row.fileName), row });
         }
       }
     }
@@ -309,6 +323,10 @@
       buildings: filterByProject(state.buildings, projectId),
       scopes: filterByProject(state.scopes, projectId),
       scopeDetections: filterByProject(state.scopeDetections, projectId),
+      drawingMeasurements: filterByProject(state.drawingMeasurements, projectId),
+      drawingIssues: filterByProject(state.drawingIssues, projectId),
+      drawingScaleCalibrations: filterByProject(state.drawingScaleCalibrations, projectId),
+      drawingRevisionReviews: filterByProject(state.drawingRevisionReviews, projectId),
       takeoffMeasurements: filterByProject(state.takeoffMeasurements, projectId),
       estimateLineItems: filterByProject(state.estimateLineItems, projectId),
       rfis: filterByProject(state.rfis, projectId),
@@ -330,6 +348,18 @@
     const rows = [
       ["record_type", "id", "name", "quantity", "unit", "status", "confidence", "total"],
     ];
+    for (const row of bundle.drawingMeasurements) {
+      rows.push([
+        "drawing_measurement",
+        row.id,
+        row.label,
+        row.quantity,
+        row.unit,
+        row.status || "",
+        row.confidence,
+        "",
+      ]);
+    }
     for (const row of bundle.takeoffMeasurements) {
       rows.push([
         "takeoff",
@@ -424,15 +454,32 @@
       row.promotedMeasurementId = remap(idMaps.takeoffMeasurements, row.promotedMeasurementId);
       row.promotedEstimateItemId = remap(idMaps.estimateLineItems, row.promotedEstimateItemId);
     }
+    for (const row of filterByProject(state.drawingMeasurements, projectId)) {
+      row.sheetId = remap(idMaps.drawings, row.sheetId);
+      row.drawingId = remap(idMaps.drawings, row.drawingId);
+      row.linkedTakeoffItemId = remap(idMaps.takeoffMeasurements, row.linkedTakeoffItemId);
+    }
+    for (const row of filterByProject(state.drawingIssues, projectId)) {
+      row.sheetId = remap(idMaps.drawings, row.sheetId);
+      row.linkedMeasurementId = remap(idMaps.drawingMeasurements, row.linkedMeasurementId);
+    }
+    for (const row of filterByProject(state.drawingScaleCalibrations, projectId)) {
+      row.sheetId = remap(idMaps.drawings, row.sheetId);
+    }
+    for (const row of filterByProject(state.drawingRevisionReviews, projectId)) {
+      row.sheetId = remap(idMaps.drawings, row.sheetId);
+    }
     for (const row of filterByProject(state.estimateLineItems, projectId)) {
       row.sourceMeasurementId = remap(idMaps.takeoffMeasurements, row.sourceMeasurementId);
       row.scopeId = remap(idMaps.scopes, row.scopeId);
     }
     for (const row of filterByProject(state.rfis, projectId)) {
+      row.sheetId = remap(idMaps.drawings, row.sheetId);
       row.drawingId = remap(idMaps.drawings, row.drawingId);
       row.roomId = remap(idMaps.rooms, row.roomId);
       row.scopeId = remap(idMaps.scopes, row.scopeId);
       row.estimateItemId = remap(idMaps.estimateLineItems, row.estimateItemId);
+      row.linkedMeasurementId = remap(idMaps.drawingMeasurements, row.linkedMeasurementId);
     }
     for (const row of filterByProject(state.riskItems, projectId)) {
       if (row.referenceType === "takeoff") row.referenceId = remap(idMaps.takeoffMeasurements, row.referenceId);

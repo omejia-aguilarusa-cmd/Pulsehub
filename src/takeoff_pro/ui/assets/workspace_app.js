@@ -21,6 +21,7 @@
     searchProject,
     applyTakeoffFilters,
   } = window.WorkspaceLogic;
+  const drawingServices = window.DrawingWorkspaceServices;
 
   const appRoot = document.getElementById("app");
   const DB_NAME = "takeoff-workspace";
@@ -57,11 +58,38 @@
     error: "",
     route: getRoute(),
     sidebarOpen: false,
+    globalSidebarCollapsed: readPreference("globalSidebarCollapsed", false),
     searchQuery: "",
     selectedDrawingId: null,
     viewerPageByDrawingId: {},
     previewUrls: new Map(),
     missingFileIds: new Set(),
+    drawingMode: readPreference("lastSelectedMode", "view"),
+    sheetNavigatorCollapsed: readPreference("sheetNavigatorCollapsed", false),
+    rightInspectorCollapsed: readPreference("rightInspectorCollapsed", false),
+    focusModeEnabled: false,
+    focusRestoreLayout: null,
+    visibleLayers: readJsonPreference("visibleDrawingLayers", drawingServices.drawingService.defaultVisibleLayers()),
+    confidenceHeatmap: readPreference("confidenceHeatmap", false),
+    selectedMeasurementId: null,
+    selectedIssueId: null,
+    selectedRfiId: null,
+    selectedMeasurementTool: "",
+    activeInspectorTab: "selection",
+    aiProcessingState: null,
+    sheetFilters: {
+      discipline: "all",
+      query: "",
+    },
+    drawingSearchQuery: "",
+    reviewFilter: "all",
+    rfiFilter: "all",
+    compare: {
+      baseRevisionId: "rev-previous",
+      currentRevisionId: "rev-current",
+      highlightChanges: true,
+      overlayCompare: true,
+    },
     takeoffFilters: {
       roomId: "",
       floorId: "",
@@ -174,6 +202,7 @@
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("change", handleChange);
   document.addEventListener("input", handleInput);
+  document.addEventListener("keydown", handleKeyboardShortcuts);
 
   function render() {
     if (!statefulUi.loaded) {
@@ -186,7 +215,7 @@
     }
     const project = getActiveProject();
     appRoot.innerHTML = `
-      <div class="app-shell">
+      <div class="app-shell ${statefulUi.globalSidebarCollapsed ? "sidebar-collapsed" : ""} ${statefulUi.focusModeEnabled && statefulUi.route === "drawing-viewer" ? "drawing-focus-mode" : ""}">
         ${renderSidebar(project)}
         ${statefulUi.sidebarOpen ? `<button class="mobile-overlay" data-action="close-sidebar" aria-label="Close navigation"></button>` : ""}
         <main class="main-shell">
@@ -207,10 +236,11 @@
     const userEmail = cleanText(state.settings.userEmail);
     const userInitials = userName ? initials(userName) : "—";
     return `
-      <aside class="sidebar ${statefulUi.sidebarOpen ? "open" : ""}" aria-label="Primary navigation">
+      <aside class="sidebar ${statefulUi.sidebarOpen ? "open" : ""} ${statefulUi.globalSidebarCollapsed ? "collapsed" : ""}" aria-label="Primary navigation" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">▲</div>
           <div class="brand-copy"><strong>Takeoff</strong><span>Estimating Workspace</span></div>
+          <button class="sidebar-collapse-toggle" data-action="toggle-global-sidebar" aria-label="${statefulUi.globalSidebarCollapsed ? "Expand navigation" : "Collapse navigation"}" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">${statefulUi.globalSidebarCollapsed ? ">" : "<"}</button>
         </div>
         <div class="sidebar-scroll">
           <button class="sidebar-action" data-action="open-project-modal" aria-label="Create new project"><span class="nav-icon">＋</span><span class="nav-text">New project</span></button>
@@ -264,6 +294,7 @@
       <header class="topbar">
         <div class="topbar-left">
           <button class="menu-toggle" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button>
+          <button class="topbar-sidebar-toggle" data-action="toggle-global-sidebar" aria-label="${statefulUi.globalSidebarCollapsed ? "Expand global sidebar" : "Collapse global sidebar"}" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">${statefulUi.globalSidebarCollapsed ? ">" : "<"}</button>
           <div class="breadcrumb"><strong>${escapeHtml(project ? project.name : "Workspace")}</strong><span>/</span><span>${escapeHtml(routeLabel)}</span></div>
           ${project ? `<span class="status-pill"><span class="status-dot"></span>${escapeHtml(status)}</span>` : ""}
         </div>
@@ -292,7 +323,7 @@
     switch (statefulUi.route) {
       case "dashboard": return renderDashboard(project);
       case "documents": return renderDocuments(project);
-      case "drawing-viewer": return renderDrawingViewer(project);
+      case "drawing-viewer": return renderAdvancedDrawingViewer(project);
       case "takeoff": return renderTakeoff(project);
       case "scope-detection": return renderScopeDetection(project);
       case "questions-rfis": return renderQuestionsRfis(project);
@@ -388,6 +419,429 @@
     if (isPdf(active)) return `<div class="viewer-frame"><iframe title="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}#page=${page}"></iframe></div>`;
     if (isImage(active)) return `<div class="viewer-frame"><img alt="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}"></div>`;
     return `<div class="empty-state"><h3>Preview not available</h3><p>This file type is stored and can be opened, but it cannot be previewed in the viewer.</p><button class="button" data-action="open-document" data-id="${active.id}">Open file</button></div>`;
+  }
+
+  function renderAdvancedDrawingViewer(project) {
+    const sheets = drawingServices.drawingService.getSheets(state, project.id);
+    const preferredActiveId = state.settings.activeDrawingIdByProject[project.id] || sheets[0]?.id || null;
+    const active = sheets.find((item) => item.id === preferredActiveId) || sheets[0] || null;
+    const activeId = active?.id || null;
+    const page = active ? statefulUi.viewerPageByDrawingId[active.id] || 1 : 1;
+    const allMeasurements = filterByProject(state.drawingMeasurements, project.id);
+    const measurements = active ? allMeasurements.filter((item) => (item.sheetId || item.drawingId) === active.id) : [];
+    const issues = active ? getDrawingIssues(project.id, active, measurements) : [];
+    const rfis = active ? getDrawingRfis(project.id, active.id) : [];
+    const revision = active ? drawingServices.revisionService.getRevisionDelta({ projectId: project.id, sheetId: active.id }) : null;
+    return `
+      <div class="drawing-workspace ${statefulUi.focusModeEnabled ? "focus-enabled" : ""}">
+        ${renderDrawingTopBar(project, active, measurements, revision)}
+        ${sheets.length ? `
+          ${renderModeToolbar(active)}
+          <div class="drawing-review-layout ${statefulUi.sheetNavigatorCollapsed ? "sheets-collapsed" : ""} ${statefulUi.rightInspectorCollapsed ? "inspector-collapsed" : ""}">
+            ${renderSheetNavigator(sheets, activeId)}
+            <section class="drawing-canvas-region" aria-label="Drawing canvas">
+              ${renderDrawingCanvas(project, active, page, measurements, issues, rfis, revision)}
+            </section>
+            ${renderRightInspector(project, active, measurements, issues, rfis, revision)}
+          </div>
+        ` : renderInlineEmpty("No drawings available.", "Upload a supported file in Documents to preview it here.", `<button class="button primary" data-route="documents">Go to Documents</button>`)}
+      </div>
+    `;
+  }
+
+  function renderDrawingTopBar(project, active, measurements, revision) {
+    const confidence = measurements.length ? Math.round(measurements.reduce((sum, item) => sum + Number(item.confidence || 0), 0) / measurements.length) : null;
+    const aiStatus = statefulUi.aiProcessingState?.status === "processing" ? "Processing" : active ? active.aiStatus : "Not processed";
+    const results = active ? getDrawingSearchResults(project, active) : [];
+    return `
+      <header class="drawing-topbar" aria-label="Drawing Viewer controls">
+        <div class="drawing-topbar-main">
+          <div class="breadcrumb drawing-breadcrumb"><strong>${escapeHtml(project.name)}</strong><span>/</span><span>Drawing Viewer</span></div>
+          <div class="sheet-title-line">
+            <strong>${active ? `${escapeHtml(active.sheetNumber)} - ${escapeHtml(active.sheetTitle)}` : "No sheet selected"}</strong>
+            ${active ? `<span class="tag">${escapeHtml(active.revision)} - ${escapeHtml(active.revisionName)}</span>` : ""}
+            ${renderStatusTag(aiStatus)}
+            ${confidence == null ? `<span class="tag">Confidence unavailable</span>` : `<span class="tag ok">Confidence ${confidence}%</span>`}
+            <span class="tag warn">Bid due in 10 days</span>
+          </div>
+        </div>
+        <div class="drawing-topbar-actions">
+          <div class="search-wrap drawing-search-wrap">
+            <input class="search-input drawing-search-input" data-role="drawing-search" type="search" value="${escapeAttribute(statefulUi.drawingSearchQuery)}" placeholder="Search sheet, scope, RFI" aria-label="Search drawings">
+            ${renderDrawingSearchResults(results)}
+          </div>
+          <button class="button" data-action="share-placeholder" aria-label="Share drawing placeholder">Share</button>
+          <button class="button" data-action="open-export-modal" aria-label="Export drawing data placeholder">Export</button>
+          <button class="button ${statefulUi.focusModeEnabled ? "primary" : ""}" data-action="toggle-focus-mode" aria-label="${statefulUi.focusModeEnabled ? "Exit focus mode" : "Enter focus mode"}">${statefulUi.focusModeEnabled ? "Exit focus" : "Focus"}</button>
+        </div>
+      </header>
+      ${revision ? `<div class="addendum-strip"><strong>${escapeHtml(revision.addendumName)}</strong><span>${escapeHtml(revision.quantityDeltas[0]?.cause || "Revision delta available.")}</span></div>` : ""}
+    `;
+  }
+
+  function renderDrawingSearchResults(results) {
+    if (!statefulUi.drawingSearchQuery) return "";
+    if (!results.length) return `<div class="search-results"><div class="search-result"><span>No drawing results</span></div></div>`;
+    return `<div class="search-results">${results.map((item) => `
+      <button class="search-result" data-action="open-drawing-search-result" data-id="${escapeAttribute(item.id)}" data-type="${escapeAttribute(item.type)}" data-sheet-id="${escapeAttribute(item.sheetId || "")}">
+        <span>${escapeHtml(item.label)}</span><span class="result-type">${escapeHtml(item.type)}</span>
+      </button>`).join("")}</div>`;
+  }
+
+  function renderModeToolbar(active) {
+    return `
+      <div class="drawing-toolbar" aria-label="Drawing mode toolbar">
+        <div class="mode-selector" role="tablist" aria-label="Drawing mode">
+          ${drawingServices.MODES.map((mode) => `<button class="mode-tab ${statefulUi.drawingMode === mode.key ? "active" : ""}" role="tab" aria-selected="${statefulUi.drawingMode === mode.key ? "true" : "false"}" data-action="set-drawing-mode" data-mode="${mode.key}">${escapeHtml(mode.label)}</button>`).join("")}
+        </div>
+        <div class="secondary-toolbar">
+          ${renderSecondaryToolbar(active)}
+          ${renderLayerManager()}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSecondaryToolbar(active) {
+    const tools = drawingServices.TOOLSETS[statefulUi.drawingMode] || [];
+    const toolButtons = tools.map((tool) => {
+      if (tool.action === "set-base-revision") {
+        return `<label class="compact-field"><span>Base</span><select data-role="base-revision"><option value="rev-previous" ${statefulUi.compare.baseRevisionId === "rev-previous" ? "selected" : ""}>Rev 1</option><option value="rev-current" ${statefulUi.compare.baseRevisionId === "rev-current" ? "selected" : ""}>Rev 2</option></select></label>`;
+      }
+      if (tool.action === "set-current-revision") {
+        return `<label class="compact-field"><span>Current</span><select data-role="current-revision"><option value="rev-current" ${statefulUi.compare.currentRevisionId === "rev-current" ? "selected" : ""}>Rev 2</option><option value="rev-addendum" ${statefulUi.compare.currentRevisionId === "rev-addendum" ? "selected" : ""}>Addendum 02</option></select></label>`;
+      }
+      const activeTool = tool.action === "set-measurement-tool" && statefulUi.selectedMeasurementTool === tool.tool;
+      const activeToggle = (tool.action === "toggle-revision-changes" && statefulUi.compare.highlightChanges) || (tool.action === "toggle-overlay-compare" && statefulUi.compare.overlayCompare);
+      return `<button class="tool-button ${tool.primary ? "primary" : ""} ${activeTool || activeToggle ? "active" : ""}" data-action="${tool.action}" ${tool.tool ? `data-tool="${tool.tool}"` : ""} ${tool.filter ? `data-filter="${tool.filter}"` : ""} ${active ? "" : "disabled"} aria-label="${escapeAttribute(tool.label)}">${escapeHtml(tool.label)}</button>`;
+    }).join("");
+    return toolButtons || `<span class="muted-text">No tools available.</span>`;
+  }
+
+  function renderLayerManager() {
+    return `
+      <details class="layer-manager">
+        <summary class="button" aria-label="Open layer manager">Layers</summary>
+        <div class="layer-menu">
+          <label class="layer-toggle heatmap-toggle"><input type="checkbox" data-role="confidence-heatmap" ${statefulUi.confidenceHeatmap ? "checked" : ""}> Confidence heatmap</label>
+          ${drawingServices.DEFAULT_DRAWING_LAYERS.map((layer) => `
+            <label class="layer-toggle">
+              <input type="checkbox" data-role="drawing-layer" data-layer="${layer.key}" ${statefulUi.visibleLayers[layer.key] ? "checked" : ""}>
+              <span>${escapeHtml(layer.label)}</span>
+            </label>`).join("")}
+        </div>
+      </details>
+    `;
+  }
+
+  function renderSheetNavigator(sheets, activeId) {
+    const filtered = filterSheetsForNavigator(sheets);
+    if (statefulUi.sheetNavigatorCollapsed) {
+      return `<aside class="sheet-navigator collapsed" aria-label="Sheet navigator collapsed"><button class="vertical-tab" data-action="toggle-sheet-navigator" aria-expanded="false" aria-label="Expand sheet navigator">Sheets</button></aside>`;
+    }
+    return `
+      <aside class="sheet-navigator" aria-label="Sheet navigator">
+        <div class="navigator-header">
+          <div><h2>Sheets</h2><p>${filtered.length} of ${sheets.length} visible</p></div>
+          <button class="button ghost icon-button" data-action="toggle-sheet-navigator" aria-label="Collapse sheet navigator" aria-expanded="true">&lt;</button>
+        </div>
+        <div class="navigator-tools">
+          <input class="search-input sheet-search" data-role="sheet-search" type="search" value="${escapeAttribute(statefulUi.sheetFilters.query)}" placeholder="Search sheets" aria-label="Search sheets">
+          <div class="sheet-filter-row" aria-label="Sheet filters">
+            ${drawingServices.SHEET_FILTERS.map((filter) => `<button class="pill ${statefulUi.sheetFilters.discipline === filter.key ? "active" : ""}" data-action="set-sheet-filter" data-filter="${filter.key}">${escapeHtml(filter.label)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="sheet-list">
+          ${filtered.length ? filtered.map((sheet) => renderSheetItem(sheet, activeId)).join("") : renderInlineEmpty("No matching sheets.", "Adjust the sheet filters or search term.")}
+        </div>
+      </aside>
+    `;
+  }
+
+  function renderSheetItem(sheet, activeId) {
+    return `
+      <button class="sheet-item ${activeId === sheet.id ? "active" : ""}" data-action="select-drawing" data-id="${sheet.id}" aria-label="Open sheet ${escapeAttribute(sheet.sheetNumber)}">
+        <span class="sheet-thumb" aria-hidden="true">${escapeHtml(sheet.sheetNumber.slice(0, 3))}</span>
+        <span class="sheet-meta">
+          <strong>${escapeHtml(sheet.sheetNumber)}</strong>
+          <span>${escapeHtml(sheet.sheetTitle)}</span>
+          <small>${escapeHtml(sheet.revision)} - ${escapeHtml(sheet.revisionName)}</small>
+          <span class="sheet-badges">${sheet.statuses.slice(0, 3).map((status) => renderStatusTag(status)).join("")}</span>
+        </span>
+      </button>
+    `;
+  }
+
+  function renderDrawingCanvas(project, active, page, measurements, issues, rfis, revision) {
+    if (!active) return renderInlineEmpty("No sheet selected.", "Select a sheet from the navigator.");
+    const reviewStats = getReviewStats(measurements);
+    return `
+      <div class="canvas-status-bar">
+        <div class="inline-actions">
+          ${renderStatusTag(active.aiStatus)}
+          ${renderStatusTag(active.scaleCalibration ? active.scaleCalibration.scaleConfidence : "Scale missing")}
+          <span class="tag">${reviewStats.needsReview} needs review</span>
+          <span class="tag ok">${reviewStats.approved} approved</span>
+          <span class="tag">${reviewStats.pushed} pushed</span>
+        </div>
+        <div class="inline-actions">
+          ${isPdf(active) ? `<button class="button ghost" data-action="viewer-prev-page" data-id="${active.id}" aria-label="Previous PDF page">Previous</button><input class="button page-input" type="number" min="1" value="${page}" data-role="viewer-page" data-id="${active.id}" aria-label="PDF page number"><button class="button ghost" data-action="viewer-next-page" data-id="${active.id}" aria-label="Next PDF page">Next</button>` : ""}
+          <button class="button ghost" data-action="toggle-right-inspector" aria-label="${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}" aria-expanded="${statefulUi.rightInspectorCollapsed ? "false" : "true"}">${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}</button>
+        </div>
+      </div>
+      <div class="drawing-stage ${statefulUi.confidenceHeatmap ? "heatmap-enabled" : ""}">
+        <div class="drawing-document-layer">
+          ${renderDrawingPreview(active, page)}
+        </div>
+        ${renderCanvasOverlays(project, active, measurements, issues, rfis, revision)}
+      </div>
+      ${statefulUi.drawingMode === "compare" ? renderRevisionDeltaPanel(revision) : ""}
+      ${statefulUi.selectedMeasurementTool ? `<div class="measurement-tool-callout"><strong>${escapeHtml(titleCase(statefulUi.selectedMeasurementTool))} tool active.</strong><span>Canvas interaction is mocked; use Add sample to create a placeholder measurement.</span></div>` : ""}
+    `;
+  }
+
+  function renderRevisionDeltaPanel(revision) {
+    if (!revision) return "";
+    return `
+      <div class="revision-delta-panel">
+        <strong>${escapeHtml(revision.revisionName)} - ${escapeHtml(revision.addendumName)}</strong>
+        <div class="revision-delta-list">
+          ${revision.quantityDeltas.map((delta) => `<div class="revision-delta-row"><span>${escapeHtml(delta.label)}</span><strong>${formatNumber(delta.previous)} ${escapeHtml(delta.unit)} -> ${formatNumber(delta.current)} ${escapeHtml(delta.unit)}</strong><em>${delta.delta > 0 ? "+" : ""}${formatNumber(delta.delta)} ${escapeHtml(delta.unit)}</em><small>${escapeHtml(delta.cause)}</small></div>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDrawingPreview(active, page) {
+    if (!active) return "";
+    const url = statefulUi.previewUrls.get(active.id);
+    if (statefulUi.missingFileIds.has(active.id)) {
+      return `<div class="empty-state"><h3>Original file unavailable</h3><p>The document record exists, but the original local file is not stored in this workspace. Re-upload the document to preview it again.</p><button class="button" data-route="documents">Go to Documents</button></div>`;
+    }
+    if (!url) return renderMockPlan(active, "Loading drawing preview...");
+    if (isPdf(active)) return `<div class="viewer-frame drawing-preview-frame"><iframe title="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}#page=${page}"></iframe></div>`;
+    if (isImage(active)) return `<div class="viewer-frame drawing-preview-frame"><img alt="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}"></div>`;
+    return renderMockPlan(active, "Preview not available for this file type.");
+  }
+
+  function renderMockPlan(active, message) {
+    return `
+      <div class="mock-plan" role="img" aria-label="${escapeAttribute(active.sheetNumber)} placeholder plan">
+        <div class="mock-plan-title"><strong>${escapeHtml(active.sheetNumber)}</strong><span>${escapeHtml(active.sheetTitle)}</span></div>
+        <div class="mock-grid-line h one"></div><div class="mock-grid-line h two"></div><div class="mock-grid-line h three"></div>
+        <div class="mock-grid-line v one"></div><div class="mock-grid-line v two"></div><div class="mock-grid-line v three"></div>
+        <div class="mock-room room-a">Exam 101</div>
+        <div class="mock-room room-b">Lobby</div>
+        <div class="mock-room room-c">Corridor</div>
+        <div class="mock-room room-d">Office</div>
+        <span class="mock-plan-note">${escapeHtml(message)}</span>
+      </div>
+    `;
+  }
+
+  function renderCanvasOverlays(project, active, measurements, issues, rfis, revision) {
+    const visibleMeasurements = measurements.filter((item) => measurementVisible(item));
+    const visibleIssues = issues.filter((item) => issueVisible(item));
+    const visibleRfis = rfis.filter((item) => rfiVisible(item));
+    const revisionAreas = statefulUi.drawingMode === "compare" && statefulUi.compare.highlightChanges && statefulUi.visibleLayers["revision-changes"] ? revision.changedAreas : [];
+    return `
+      <svg class="drawing-svg-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Drawing overlays">
+        ${visibleMeasurements.map((item) => renderMeasurementOverlay(item)).join("")}
+        ${revisionAreas.map((item) => renderRevisionOverlay(item)).join("")}
+      </svg>
+      <div class="pin-overlay">
+        ${visibleMeasurements.filter((item) => item.geometry?.kind === "point").map((item) => renderPointPin("measurement", item.id, item.geometry, item.label, item.confidence, item.status)).join("")}
+        ${visibleIssues.map((item) => renderPointPin("issue", item.id, item.geometry || { kind: "point", x: 24, y: 18 }, item.title, null, item.status)).join("")}
+        ${visibleRfis.map((item) => renderPointPin("rfi", item.id, item.locationGeometry || { kind: "point", x: 70, y: 40 }, item.title, null, item.status)).join("")}
+      </div>
+    `;
+  }
+
+  function renderMeasurementOverlay(item) {
+    if (!item.geometry || item.geometry.kind === "point") return "";
+    return renderGeometryShape(item.geometry, {
+      id: item.id,
+      action: "select-measurement",
+      label: item.label,
+      className: `measurement-overlay ${selectedClass("measurement", item.id)} ${confidenceClass(item.confidence)} status-${escapeAttribute(item.status || "detected")}`,
+      title: `${item.label} - ${formatNumber(item.quantity)} ${item.unit || ""} - ${item.confidence == null ? "No" : item.confidence + "%"} confidence - ${titleCase(item.status)}`,
+    });
+  }
+
+  function renderRevisionOverlay(item) {
+    return renderGeometryShape(item.geometry, {
+      id: item.id,
+      action: "select-revision-change",
+      label: item.label,
+      className: "revision-overlay",
+      title: item.label,
+    });
+  }
+
+  function renderGeometryShape(geometry, options) {
+    const attrs = `data-action="${options.action}" data-id="${escapeAttribute(options.id)}" class="${options.className}" tabindex="0" role="button" aria-label="${escapeAttribute(options.label)}"`;
+    const title = `<title>${escapeHtml(options.title || options.label)}</title>`;
+    if (geometry.kind === "rect") {
+      return `<rect ${attrs} x="${num(geometry.x)}" y="${num(geometry.y)}" width="${num(geometry.width)}" height="${num(geometry.height)}" rx="1">${title}</rect>`;
+    }
+    if (geometry.kind === "polygon") {
+      return `<polygon ${attrs} points="${geometry.points.map((point) => `${num(point.x)},${num(point.y)}`).join(" ")}">${title}</polygon>`;
+    }
+    if (geometry.kind === "line") {
+      return `<line ${attrs} x1="${num(geometry.points[0]?.x)}" y1="${num(geometry.points[0]?.y)}" x2="${num(geometry.points[1]?.x)}" y2="${num(geometry.points[1]?.y)}">${title}</line>`;
+    }
+    if (geometry.kind === "polyline") {
+      return `<polyline ${attrs} points="${geometry.points.map((point) => `${num(point.x)},${num(point.y)}`).join(" ")}">${title}</polyline>`;
+    }
+    return "";
+  }
+
+  function renderPointPin(type, id, geometry, label, confidence, status) {
+    const action = type === "measurement" ? "select-measurement" : type === "issue" ? "select-issue" : "select-rfi";
+    const className = `overlay-pin ${type}-pin ${selectedClass(type, id)} ${confidenceClass(confidence)}`;
+    return `<button class="${className}" data-action="${action}" data-id="${escapeAttribute(id)}" style="left:${num(geometry.x)}%;top:${num(geometry.y)}%" title="${escapeAttribute(`${label} - ${titleCase(status || "")}`)}" aria-label="${escapeAttribute(`${type} pin: ${label}`)}">${type === "rfi" ? "RFI" : type === "issue" ? "!" : "Q"}</button>`;
+  }
+
+  function renderRightInspector(project, active, measurements, issues, rfis, revision) {
+    if (statefulUi.rightInspectorCollapsed) {
+      return `<aside class="right-inspector collapsed" aria-label="Inspector collapsed"><button class="vertical-tab right" data-action="toggle-right-inspector" aria-expanded="false" aria-label="Expand inspector">Inspector</button></aside>`;
+    }
+    const selected = getSelectedContext(active, measurements, issues, rfis);
+    return `
+      <aside class="right-inspector" aria-label="Context inspector">
+        <div class="inspector-header">
+          <div><h2>Inspector</h2><p>${selected ? escapeHtml(selected.label) : active ? `${escapeHtml(active.sheetNumber)} summary` : "No sheet selected"}</p></div>
+          <button class="button ghost icon-button" data-action="toggle-right-inspector" aria-label="Collapse inspector" aria-expanded="true">&gt;</button>
+        </div>
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector tabs">
+          ${["selection", "calculation", "issues", "history", "linked-takeoff"].map((tab) => `<button class="inspector-tab ${statefulUi.activeInspectorTab === tab ? "active" : ""}" data-action="set-inspector-tab" data-tab="${tab}" role="tab" aria-selected="${statefulUi.activeInspectorTab === tab ? "true" : "false"}">${escapeHtml(titleCase(tab))}</button>`).join("")}
+        </div>
+        <div class="inspector-body">
+          ${renderInspectorContent(project, active, selected, measurements, issues, rfis, revision)}
+        </div>
+      </aside>
+    `;
+  }
+
+  function renderInspectorContent(project, active, selected, measurements, issues, rfis, revision) {
+    switch (statefulUi.activeInspectorTab) {
+      case "calculation": return renderCalculationTab(selected, active);
+      case "issues": return renderIssuesTab(selected, issues);
+      case "history": return renderHistoryTab(project, selected, active);
+      case "linked-takeoff": return renderLinkedTakeoffTab(project, selected);
+      default: return renderSelectionTab(active, selected, measurements, issues, rfis, revision);
+    }
+  }
+
+  function renderSelectionTab(active, selected, measurements, issues, rfis, revision) {
+    if (!selected) {
+      const stats = getReviewStats(measurements);
+      return `
+        <div class="summary-grid">
+          ${metricMini("Sheet status", active?.aiStatus || "No sheet")}
+          ${metricMini("Detected", stats.detected)}
+          ${metricMini("Reviewed", stats.reviewed)}
+          ${metricMini("Approved", stats.approved)}
+          ${metricMini("Rejected", stats.rejected)}
+          ${metricMini("Pushed", stats.pushed)}
+          ${metricMini("Needs review", stats.needsReview)}
+          ${metricMini("Open RFIs", rfis.filter((item) => !["Closed", "closed", "resolved"].includes(item.status)).length)}
+          ${metricMini("Low confidence", measurements.filter((item) => Number(item.confidence || 0) < 70).length)}
+          ${metricMini("Revision impact", revision?.quantityDeltas.length || 0)}
+          ${metricMini("Scale status", active?.scaleCalibration?.scaleConfidence || "Missing")}
+        </div>
+        <div class="inspector-section">
+          <h3>Review workflow</h3>
+          <p>AI quantities stay in Drawing Viewer until an estimator approves them and pushes them to Takeoff. They do not update the final Estimate directly.</p>
+        </div>
+      `;
+    }
+    if (selected.kind === "measurement") {
+      const item = selected.item;
+      return `
+        <div class="inspector-section">
+          <h3>${escapeHtml(item.label)}</h3>
+          <dl class="detail-list">
+            <dt>Type</dt><dd>${escapeHtml(titleCase(item.type))} / ${escapeHtml(titleCase(item.category))}</dd>
+            <dt>Quantity</dt><dd>${formatNumber(item.quantity)} ${escapeHtml(item.unit || "")}</dd>
+            <dt>Status</dt><dd>${renderStatusTag(item.status)}</dd>
+            <dt>Confidence</dt><dd>${item.confidence == null ? "Unavailable" : `${item.confidence}%`}</dd>
+            <dt>Source</dt><dd>${escapeHtml(item.createdBy === "ai" ? "AI draft" : "Manual")}</dd>
+          </dl>
+          <div class="inline-actions">
+            <button class="button primary" data-action="approve-selected-measurement">Accept</button>
+            <button class="button" data-action="reject-selected-measurement">Reject</button>
+            <button class="button" data-action="edit-selected-measurement">Edit</button>
+            <button class="button ghost" data-action="duplicate-selected-measurement">Duplicate</button>
+            <button class="button ghost" data-action="exclude-selected-measurement">Exclude</button>
+          </div>
+        </div>
+      `;
+    }
+    if (selected.kind === "rfi") {
+      const item = selected.item;
+      return `<div class="inspector-section"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.description || item.question || "No description.")}</p><dl class="detail-list"><dt>Status</dt><dd>${renderStatusTag(item.status)}</dd><dt>Priority</dt><dd>${escapeHtml(item.priority || "medium")}</dd></dl></div>`;
+    }
+    return `<div class="inspector-section"><h3>${escapeHtml(selected.item.title)}</h3><p>${escapeHtml(selected.item.description || "No issue description.")}</p><button class="button" data-action="create-rfi-from-selected-issue">Create RFI from issue</button></div>`;
+  }
+
+  function renderCalculationTab(selected, active) {
+    if (!selected || selected.kind !== "measurement") {
+      return `<div class="inspector-section"><h3>Scale and calculation basis</h3><p>${active?.scaleCalibration ? `Scale ${escapeHtml(active.scaleCalibration.scaleValue)} from ${escapeHtml(active.scaleCalibration.scaleSource)}.` : "Scale is missing. Calibrate the sheet before relying on measurement quantities."}</p><button class="button" data-action="open-scale-modal">Open scale calibration</button></div>`;
+    }
+    const item = selected.item;
+    return `
+      <div class="inspector-section">
+        <h3>Calculation</h3>
+        <p>${escapeHtml(item.calculationSummary || "No calculation summary available.")}</p>
+        <dl class="detail-list">
+          <dt>Inputs</dt><dd>${escapeHtml((item.sourceRefs || []).map((ref) => ref.type).join(", ") || "Sheet geometry")}</dd>
+          <dt>Deductions</dt><dd>${escapeHtml(item.category === "paint" ? "Openings deducted from AI assumptions." : "None recorded.")}</dd>
+          <dt>Waste factor</dt><dd>${escapeHtml(item.category === "paint" ? "5%" : "Not applied")}</dd>
+          <dt>Height assumptions</dt><dd>${escapeHtml((item.assumptions || []).join(" ") || "No assumptions recorded.")}</dd>
+        </dl>
+      </div>
+    `;
+  }
+
+  function renderIssuesTab(selected, issues) {
+    const warnings = selected?.kind === "measurement" ? selected.item.warnings || [] : [];
+    return `
+      <div class="inspector-section">
+        <h3>Issues</h3>
+        ${warnings.length ? warnings.map((warning) => `<p class="issue-line">${escapeHtml(warning)}</p>`).join("") : ""}
+        ${issues.length ? `<div class="compact-list">${issues.map((issue) => `<button class="compact-row" data-action="select-issue" data-id="${issue.id}"><strong>${escapeHtml(issue.title)}</strong><span>${escapeHtml(issue.status)}</span></button>`).join("")}</div>` : renderInlineEmpty("No issues found.", "Scale, low-confidence, and conflict warnings appear here.")}
+      </div>
+    `;
+  }
+
+  function renderHistoryTab(project, selected, active) {
+    const history = [
+      active ? { label: `Revision imported for ${active.sheetNumber}`, date: active.updatedAt || active.uploadedAt } : null,
+      selected?.kind === "measurement" ? { label: `${titleCase(selected.item.createdBy)} measurement created`, date: selected.item.createdAt } : null,
+      selected?.kind === "measurement" && selected.item.updatedAt ? { label: `Measurement status ${titleCase(selected.item.status)}`, date: selected.item.updatedAt } : null,
+      ...filterByProject(state.activities, project.id).slice(0, 4).map((item) => ({ label: item.message, date: item.createdAt })),
+    ].filter(Boolean);
+    return `<div class="activity-list compact-history">${history.map((item) => `<div class="activity-row"><strong>${escapeHtml(item.label)}</strong><span>${formatDateTime(item.date)}</span></div>`).join("")}</div>`;
+  }
+
+  function renderLinkedTakeoffTab(project, selected) {
+    if (!selected || selected.kind !== "measurement") {
+      return `<div class="inspector-section"><h3>Linked Takeoff</h3><p>Select a measurement to review its Takeoff link.</p></div>`;
+    }
+    const item = selected.item;
+    const linked = item.linkedTakeoffItemId ? findById(state.takeoffMeasurements, item.linkedTakeoffItemId) : state.takeoffMeasurements.find((row) => row.sourceMeasurementId === item.id);
+    return `
+      <div class="inspector-section">
+        <h3>Linked Takeoff</h3>
+        ${linked ? `<dl class="detail-list"><dt>Item</dt><dd>${escapeHtml(linked.name)}</dd><dt>Quantity</dt><dd>${formatNumber(linked.quantity)} ${escapeHtml(linked.unit)}</dd><dt>Estimate status</dt><dd>Available for estimate generation</dd></dl>` : `<p>No takeoff item is linked yet.</p>`}
+        <button class="button primary" data-action="push-selected-to-takeoff" ${item.status === "approved" ? "" : "disabled"}>Push to Takeoff</button>
+      </div>
+    `;
+  }
+
+  function metricMini(label, value) {
+    return `<div class="metric-mini"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
   }
 
   function renderTakeoff(project) {
@@ -622,17 +1076,112 @@
       case "estimate": return modalShell(payload.id ? "Edit estimate line" : "Manual estimate line", renderEstimateForm(payload), "Save line", "estimate");
       case "risk": return modalShell("Review confidence issue", renderRiskForm(payload), "Save review", "risk");
       case "memory": return modalShell(payload.id ? "Edit memory entry" : "Add memory entry", renderMemoryForm(payload), "Save entry", "memory");
+      case "aiMeasurement": return modalShell("Run AI measurement", renderAiMeasurementForm(project), statefulUi.aiProcessingState?.status === "processing" ? "Processing..." : "Run AI", "ai-measurement", statefulUi.aiProcessingState?.status === "processing");
+      case "scaleCalibration": return modalShell("Scale & Calibration", renderScaleCalibrationForm(project, payload), "Save scale", "scale-calibration");
+      case "drawingMeasurementEdit": return modalShell("Edit drawing measurement", renderDrawingMeasurementEditForm(payload), "Save measurement", "drawing-measurement-edit");
       case "export": return renderExportModal(project);
       default: return "";
     }
   }
 
-  function modalShell(title, body, submitLabel, formName) {
-    return `<div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeAttribute(title)}"><form class="modal" data-form="${formName}"><div class="modal-header"><h2>${title}</h2><button class="button ghost" type="button" data-action="close-modal" aria-label="Close dialog">✕</button></div><div class="modal-body">${body}</div><div class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancel</button><button class="button primary" type="submit">${submitLabel}</button></div></form></div>`;
+  function modalShell(title, body, submitLabel, formName, submitDisabled = false) {
+    return `<div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="${escapeAttribute(title)}"><form class="modal" data-form="${formName}"><div class="modal-header"><h2>${title}</h2><button class="button ghost" type="button" data-action="close-modal" aria-label="Close dialog">✕</button></div><div class="modal-body">${body}</div><div class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancel</button><button class="button primary" type="submit" ${submitDisabled ? "disabled" : ""}>${submitLabel}</button></div></form></div>`;
   }
 
   function renderProjectForm() {
     return `<div class="form-grid">${field("Project name", "name", "", "text", true)}${field("Client", "client", "")}${field("Address", "address", "")}${field("Project type", "projectType", "")}${selectField("Units", "units", state.settings.units, [{ value: "imperial", label: "Imperial" }, { value: "metric", label: "Metric" }])}${field("Description", "description", "", "text", false, true)}</div>`;
+  }
+
+  function renderAiMeasurementForm(project) {
+    const sheets = drawingServices.drawingService.getSheets(state, project.id);
+    const activeId = state.settings.activeDrawingIdByProject[project.id] || sheets[0]?.id || "";
+    const revisedSheets = sheets.filter((sheet) => sheet.statuses.includes("Changed by addendum")).length;
+    const processing = statefulUi.aiProcessingState?.status === "processing";
+    return `
+      <div class="stack">
+        <div class="notice">Mock AI processing creates estimator-review measurements only. Results must be approved and pushed to Takeoff before they can be used for estimate generation.</div>
+        ${processing ? `<div class="ai-progress"><span style="width:${statefulUi.aiProcessingState.progress || 35}%"></span></div><p>Processing ${statefulUi.aiProcessingState.sheetStatuses?.length || 0} sheet(s)...</p>` : ""}
+        <div class="form-grid">
+          ${selectField("Scope", "scope", "current", [
+            { value: "current", label: "Current sheet" },
+            { value: "selected", label: "Selected sheets" },
+            { value: "all", label: "All sheets" },
+            { value: "revised", label: `Revised sheets only (${revisedSheets})` },
+          ])}
+          ${selectField("Measurement focus", "focus", "all", [
+            { value: "all", label: "All detectable scope" },
+            { value: "walls", label: "Walls" },
+            { value: "ceilings", label: "Ceilings" },
+            { value: "paint", label: "Paint" },
+            { value: "flooring", label: "Flooring" },
+            { value: "framing", label: "Framing" },
+            { value: "doors", label: "Doors / openings" },
+            { value: "counts", label: "Counts / symbols" },
+          ])}
+          <input type="hidden" name="currentSheetId" value="${escapeAttribute(activeId)}">
+          ${field("Selected sheet ids", "selectedSheetIds", activeId, "text", false, true)}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderScaleCalibrationForm(project, payload) {
+    const sheets = drawingServices.drawingService.getSheets(state, project.id);
+    const activeId = payload.sheetId || state.settings.activeDrawingIdByProject[project.id] || sheets[0]?.id || "";
+    const existing = state.drawingScaleCalibrations.find((item) => item.sheetId === activeId) || drawingServices.scaleService.defaultScaleCalibration(project.id, activeId);
+    return `
+      <div class="stack">
+        <div class="notice">Two-point calibration is a UI placeholder. Real canvas point capture can write into this same scale record later.</div>
+        <div class="form-grid">
+          ${selectField("Sheet", "sheetId", activeId, sheets.map((sheet) => ({ value: sheet.id, label: `${sheet.sheetNumber} - ${sheet.sheetTitle}` })))}
+          <label class="field"><span>Auto-detected scale</span><input value="${escapeAttribute(existing.scaleValue || drawingServices.SCALE_OPTIONS[1])}" disabled></label>
+          ${selectField("Manual scale", "scaleValue", existing.scaleValue || '1/8" = 1\'-0"', drawingServices.SCALE_OPTIONS.map((value) => ({ value, label: value })))}
+          ${selectField("Scale source", "scaleSource", existing.scaleSource || "manual", [
+            { value: "auto", label: "Auto" },
+            { value: "manual", label: "Manual" },
+            { value: "two_point", label: "Two point" },
+            { value: "missing", label: "Missing" },
+          ])}
+          ${selectField("Scale confidence", "scaleConfidence", existing.scaleConfidence || "Needs confirmation", [
+            { value: "Auto-detected", label: "Auto-detected" },
+            { value: "Manually set", label: "Manually set" },
+            { value: "Needs confirmation", label: "Needs confirmation" },
+            { value: "Missing", label: "Missing" },
+          ])}
+          ${field("Two-point real distance", "twoPointDistance", existing.twoPointDistance || "", "text")}
+          <label class="field"><span>Lock approved scale</span><select name="scaleLocked"><option value="false" ${existing.scaleLocked ? "" : "selected"}>Unlocked</option><option value="true" ${existing.scaleLocked ? "selected" : ""}>Locked</option></select></label>
+          ${field("Calibrated by", "calibratedBy", existing.calibratedBy || state.settings.userName || "Estimator")}
+          <label class="field full"><span>Multi-scale zones</span><textarea name="multiScaleZones" placeholder="Placeholder for future enlarged plan/detail zones">${escapeHtml((existing.multiScaleZones || []).join("\n"))}</textarea></label>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDrawingMeasurementEditForm(item) {
+    const current = item || {};
+    return `<div class="form-grid">
+      ${field("Label", "label", current.label || "", "text", true)}
+      ${selectField("Category", "category", current.category || "custom", [
+        { value: "walls", label: "Walls" },
+        { value: "paint", label: "Paint" },
+        { value: "ceilings", label: "Ceilings" },
+        { value: "flooring", label: "Flooring" },
+        { value: "framing", label: "Framing" },
+        { value: "doors", label: "Doors" },
+        { value: "custom", label: "Custom" },
+      ])}
+      ${field("Quantity", "quantity", current.quantity || "", "number", true)}
+      ${field("Unit", "unit", current.unit || "SF", "text", true)}
+      ${selectField("Status", "status", current.status === "pushed_to_takeoff" ? "pushed_to_takeoff" : "edited", [
+        { value: "detected", label: "Detected" },
+        { value: "reviewed", label: "Reviewed" },
+        { value: "approved", label: "Approved" },
+        { value: "rejected", label: "Rejected" },
+        { value: "edited", label: "Edited" },
+        { value: "pushed_to_takeoff", label: "Pushed to Takeoff" },
+      ])}
+      ${field("Notes", "notes", current.notes || "", "text", false, true)}
+    </div>`;
   }
 
   function renderMeasurementForm(project, item) {
@@ -762,6 +1311,7 @@
 
     switch (action) {
       case "toggle-sidebar": statefulUi.sidebarOpen = !statefulUi.sidebarOpen; render(); return;
+      case "toggle-global-sidebar": toggleGlobalSidebar(); return;
       case "close-sidebar": statefulUi.sidebarOpen = false; render(); return;
       case "open-project-modal": openModal("project"); return;
       case "close-modal": closeModal(); return;
@@ -775,6 +1325,46 @@
       case "select-drawing": await selectDrawing(id); return;
       case "viewer-prev-page": changeViewerPage(id, -1); return;
       case "viewer-next-page": changeViewerPage(id, 1); return;
+      case "toggle-focus-mode": toggleFocusMode(); return;
+      case "toggle-sheet-navigator": toggleSheetNavigator(); return;
+      case "toggle-right-inspector": toggleRightInspector(); return;
+      case "set-drawing-mode": setDrawingMode(target.dataset.mode); return;
+      case "set-measurement-tool": setMeasurementTool(target.dataset.tool); return;
+      case "set-sheet-filter": statefulUi.sheetFilters.discipline = target.dataset.filter || "all"; render(); return;
+      case "set-inspector-tab": statefulUi.activeInspectorTab = target.dataset.tab || "selection"; render(); return;
+      case "open-ai-measurement-modal": openModal("aiMeasurement"); return;
+      case "open-scale-modal": openScaleModal(); return;
+      case "add-sample-manual-measurement": await addSampleManualMeasurement(); return;
+      case "select-measurement": selectMeasurement(id); return;
+      case "select-issue": selectIssue(id); return;
+      case "select-rfi": selectRfi(id); return;
+      case "select-revision-change": pushToast("Revision change selected. Quantity deltas are shown in Compare mode."); render(); return;
+      case "approve-selected-measurement": await updateSelectedMeasurementStatus("approved"); return;
+      case "reject-selected-measurement": await rejectSelectedMeasurement(); return;
+      case "edit-selected-measurement": openSelectedMeasurementEditor(); return;
+      case "duplicate-selected-measurement": await duplicateSelectedMeasurement(); return;
+      case "exclude-selected-measurement": await excludeSelectedMeasurement(); return;
+      case "approve-high-confidence": await approveHighConfidenceMeasurements(); return;
+      case "set-review-filter": statefulUi.reviewFilter = target.dataset.filter || "all"; render(); return;
+      case "set-rfi-filter": statefulUi.rfiFilter = target.dataset.filter || "all"; render(); return;
+      case "push-approved-to-takeoff": await pushApprovedToTakeoff(); return;
+      case "push-selected-to-takeoff": await pushSelectedToTakeoff(); return;
+      case "toggle-overlay-compare": statefulUi.compare.overlayCompare = !statefulUi.compare.overlayCompare; render(); return;
+      case "toggle-revision-changes": statefulUi.compare.highlightChanges = !statefulUi.compare.highlightChanges; render(); return;
+      case "side-by-side-placeholder": pushToast("Side-by-side revision compare is a placeholder for future backend rendering."); render(); return;
+      case "show-quantity-delta": statefulUi.drawingMode = "compare"; statefulUi.activeInspectorTab = "selection"; render(); return;
+      case "add-rfi-pin": await addRfiPin(); return;
+      case "create-rfi-from-selected-issue": await createRfiFromSelectedIssue(); return;
+      case "open-drawing-search-result": await openDrawingSearchResult(target); return;
+      case "share-placeholder": pushToast("Share link placeholder. Connect to project permissions backend later."); render(); return;
+      case "viewer-zoom-out":
+      case "viewer-zoom-in":
+      case "viewer-fit-page":
+      case "viewer-fit-width":
+      case "viewer-rotate":
+      case "viewer-undo":
+      case "viewer-redo":
+      case "noop": pushToast(`${target.textContent.trim()} is a UI placeholder.`); render(); return;
       case "open-measurement-modal": openModal("measurement"); return;
       case "edit-measurement": openModal("measurement", findById(state.takeoffMeasurements, id)); return;
       case "delete-measurement": await deleteEntity("takeoffMeasurements", id, "Delete this takeoff row?"); return;
@@ -823,6 +1413,9 @@
       case "project": await submitProject(data); return;
       case "document-rename": await submitDocumentRename(data); return;
       case "measurement": await submitMeasurement(data); return;
+      case "ai-measurement": await submitAiMeasurement(data); return;
+      case "scale-calibration": await submitScaleCalibration(data); return;
+      case "drawing-measurement-edit": await submitDrawingMeasurementEdit(data); return;
       case "scope": await submitScope(data); return;
       case "rfi": await submitRfi(data); return;
       case "estimate": await submitEstimate(data); return;
@@ -867,6 +1460,24 @@
       statefulUi.viewerPageByDrawingId[target.dataset.id] = Math.max(1, Number(target.value) || 1);
       shouldRender = true;
     }
+    if (target.dataset.role === "drawing-layer") {
+      statefulUi.visibleLayers[target.dataset.layer] = Boolean(target.checked);
+      writeJsonPreference("visibleDrawingLayers", statefulUi.visibleLayers);
+      shouldRender = true;
+    }
+    if (target.dataset.role === "confidence-heatmap") {
+      statefulUi.confidenceHeatmap = Boolean(target.checked);
+      writePreference("confidenceHeatmap", statefulUi.confidenceHeatmap);
+      shouldRender = true;
+    }
+    if (target.dataset.role === "base-revision") {
+      statefulUi.compare.baseRevisionId = target.value;
+      shouldRender = true;
+    }
+    if (target.dataset.role === "current-revision") {
+      statefulUi.compare.currentRevisionId = target.value;
+      shouldRender = true;
+    }
     if (shouldRender) render();
   }
 
@@ -875,6 +1486,14 @@
     if (!(target instanceof HTMLElement)) return;
     if (target.dataset.role === "project-search") {
       statefulUi.searchQuery = target.value;
+      render();
+    }
+    if (target.dataset.role === "sheet-search") {
+      statefulUi.sheetFilters.query = target.value;
+      render();
+    }
+    if (target.dataset.role === "drawing-search") {
+      statefulUi.drawingSearchQuery = target.value;
       render();
     }
   }
@@ -949,7 +1568,7 @@
     const drawing = findById(state.drawings, id);
     if (!drawing) return;
     const name = cleanText(data.name);
-    if (!name) return pushToast("Document name is required.");
+    if (!name) return notify("Document name is required.");
     drawing.name = name;
     drawing.updatedAt = nowIso();
     addActivity(state, drawing.projectId, "document.renamed", `Renamed document to “${drawing.name}”.`);
@@ -977,6 +1596,11 @@
     if (!drawing) return;
     state.settings.activeDrawingIdByProject[drawing.projectId] = id;
     statefulUi.selectedDrawingId = id;
+    const selected = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (selected && (selected.sheetId || selected.drawingId) !== id) statefulUi.selectedMeasurementId = null;
+    const rfi = findById(state.rfis, statefulUi.selectedRfiId);
+    if (rfi && (rfi.sheetId || rfi.drawingId) !== id) statefulUi.selectedRfiId = null;
+    statefulUi.selectedIssueId = null;
     await ensurePreviewUrl(id);
     await saveAndRender();
   }
@@ -990,6 +1614,486 @@
     const current = statefulUi.viewerPageByDrawingId[id] || 1;
     statefulUi.viewerPageByDrawingId[id] = Math.max(1, current + delta);
     render();
+  }
+
+  function toggleGlobalSidebar() {
+    statefulUi.globalSidebarCollapsed = !statefulUi.globalSidebarCollapsed;
+    writePreference("globalSidebarCollapsed", statefulUi.globalSidebarCollapsed);
+    render();
+  }
+
+  function toggleSheetNavigator() {
+    statefulUi.sheetNavigatorCollapsed = !statefulUi.sheetNavigatorCollapsed;
+    writePreference("sheetNavigatorCollapsed", statefulUi.sheetNavigatorCollapsed);
+    render();
+  }
+
+  function toggleRightInspector() {
+    statefulUi.rightInspectorCollapsed = !statefulUi.rightInspectorCollapsed;
+    writePreference("rightInspectorCollapsed", statefulUi.rightInspectorCollapsed);
+    render();
+  }
+
+  function toggleFocusMode() {
+    statefulUi.focusModeEnabled = !statefulUi.focusModeEnabled;
+    if (statefulUi.focusModeEnabled) {
+      statefulUi.focusRestoreLayout = {
+        globalSidebarCollapsed: statefulUi.globalSidebarCollapsed,
+        sheetNavigatorCollapsed: statefulUi.sheetNavigatorCollapsed,
+        rightInspectorCollapsed: statefulUi.rightInspectorCollapsed,
+      };
+      statefulUi.globalSidebarCollapsed = true;
+      statefulUi.sheetNavigatorCollapsed = true;
+      statefulUi.rightInspectorCollapsed = true;
+    } else {
+      const restore = statefulUi.focusRestoreLayout || {};
+      statefulUi.globalSidebarCollapsed = Boolean(restore.globalSidebarCollapsed);
+      statefulUi.sheetNavigatorCollapsed = Boolean(restore.sheetNavigatorCollapsed);
+      statefulUi.rightInspectorCollapsed = Boolean(restore.rightInspectorCollapsed);
+      statefulUi.focusRestoreLayout = null;
+    }
+    writePreference("globalSidebarCollapsed", statefulUi.globalSidebarCollapsed);
+    writePreference("sheetNavigatorCollapsed", statefulUi.sheetNavigatorCollapsed);
+    writePreference("rightInspectorCollapsed", statefulUi.rightInspectorCollapsed);
+    render();
+  }
+
+  function setDrawingMode(mode) {
+    if (!mode) return;
+    statefulUi.drawingMode = mode;
+    statefulUi.focusModeEnabled = false;
+    writePreference("lastSelectedMode", mode);
+    if (mode === "view") statefulUi.selectedMeasurementTool = "";
+    render();
+  }
+
+  function setMeasurementTool(tool) {
+    statefulUi.selectedMeasurementTool = statefulUi.selectedMeasurementTool === tool ? "" : tool;
+    render();
+  }
+
+  function openScaleModal() {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id] || "";
+    openModal("scaleCalibration", { sheetId });
+  }
+
+  async function submitAiMeasurement(data) {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetIds = sheetIdsForAiOptions(project.id, data);
+    if (!sheetIds.length) {
+      pushToast("Select at least one sheet before running AI measurement.");
+      render();
+      return;
+    }
+    const approvedExisting = filterByProject(state.drawingMeasurements, project.id).filter((item) => sheetIds.includes(item.sheetId || item.drawingId) && ["approved", "pushed_to_takeoff"].includes(item.status));
+    if (approvedExisting.length && !window.confirm("This AI run includes sheets with approved measurements. Existing approvals will be preserved and new AI draft measurements will be added. Continue?")) return;
+    statefulUi.aiProcessingState = {
+      status: "processing",
+      progress: 38,
+      sheetStatuses: sheetIds.map((sheetId) => ({ sheetId, status: "queued" })),
+    };
+    render();
+    try {
+      const results = await drawingServices.measurementService.runAiMeasurement({
+        projectId: project.id,
+        currentSheetId: data.currentSheetId,
+        sheetIds,
+        focus: data.focus,
+      });
+      state.drawingMeasurements.push(...results);
+      statefulUi.aiProcessingState = { status: "complete", progress: 100, sheetStatuses: sheetIds.map((sheetId) => ({ sheetId, status: "complete" })) };
+      statefulUi.modal = null;
+      addActivity(state, project.id, "drawing.ai_measurement", `AI measurement draft created for ${sheetIds.length} sheet${sheetIds.length === 1 ? "" : "s"}.`);
+      await saveAndRender("AI measurement draft created.");
+    } catch (error) {
+      statefulUi.aiProcessingState = { status: "failed", progress: 0, error: error instanceof Error ? error.message : String(error) };
+      pushToast("AI measurement failed.");
+      render();
+    }
+  }
+
+  function sheetIdsForAiOptions(projectId, data) {
+    const sheets = drawingServices.drawingService.getSheets(state, projectId);
+    if (data.scope === "all") return sheets.map((sheet) => sheet.id);
+    if (data.scope === "revised") return sheets.filter((sheet) => sheet.statuses.includes("Changed by addendum")).map((sheet) => sheet.id);
+    if (data.scope === "selected") return cleanText(data.selectedSheetIds).split(/[,\s]+/).filter(Boolean);
+    return [data.currentSheetId].filter(Boolean);
+  }
+
+  async function submitScaleCalibration(data) {
+    const project = getActiveProject();
+    if (!project) return;
+    const existing = state.drawingScaleCalibrations.find((item) => item.sheetId === data.sheetId);
+    if (existing?.scaleLocked && data.scaleLocked !== "true" && !window.confirm("This scale is locked. Overwrite it?")) return;
+    const row = existing || {
+      id: createId("scale"),
+      projectId: project.id,
+      sheetId: data.sheetId,
+      createdAt: nowIso(),
+    };
+    Object.assign(row, {
+      scaleValue: cleanText(data.scaleValue),
+      scaleSource: data.scaleSource,
+      scaleConfidence: data.scaleConfidence,
+      scaleLocked: data.scaleLocked === "true",
+      calibratedBy: cleanText(data.calibratedBy) || state.settings.userName || "Estimator",
+      calibratedAt: nowIso(),
+      twoPointDistance: cleanText(data.twoPointDistance),
+      multiScaleZones: cleanText(data.multiScaleZones).split(/\n+/).filter(Boolean),
+      updatedAt: nowIso(),
+    });
+    if (!existing) state.drawingScaleCalibrations.push(row);
+    statefulUi.modal = null;
+    addActivity(state, project.id, "drawing.scale", `Updated scale for drawing sheet.`);
+    await saveAndRender("Scale calibration saved.");
+  }
+
+  async function submitDrawingMeasurementEdit(data) {
+    const measurement = findById(state.drawingMeasurements, statefulUi.modal.payload.id);
+    if (!measurement) return;
+    Object.assign(measurement, {
+      label: cleanText(data.label),
+      category: data.category,
+      quantity: numberValue(data.quantity),
+      unit: cleanText(data.unit),
+      status: data.status || "edited",
+      notes: cleanText(data.notes),
+      updatedAt: nowIso(),
+    });
+    statefulUi.modal = null;
+    addActivity(state, measurement.projectId, "drawing.measurement_edit", `Edited drawing measurement ${measurement.label}.`);
+    await saveAndRender("Measurement updated.");
+  }
+
+  async function addSampleManualMeasurement() {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id];
+    if (!sheetId) {
+      pushToast("Select a sheet before adding a manual measurement.");
+      render();
+      return;
+    }
+    const measurement = drawingServices.measurementService.createManualMeasurement({
+      projectId: project.id,
+      sheetId,
+      tool: statefulUi.selectedMeasurementTool || "line",
+    });
+    state.drawingMeasurements.push(measurement);
+    statefulUi.selectedMeasurementId = measurement.id;
+    statefulUi.selectedIssueId = null;
+    statefulUi.selectedRfiId = null;
+    addActivity(state, project.id, "drawing.manual_measurement", `Created manual drawing measurement ${measurement.label}.`);
+    await saveAndRender("Manual measurement placeholder added.");
+  }
+
+  function selectMeasurement(id) {
+    statefulUi.selectedMeasurementId = id;
+    statefulUi.selectedIssueId = null;
+    statefulUi.selectedRfiId = null;
+    statefulUi.activeInspectorTab = "selection";
+    render();
+  }
+
+  function selectIssue(id) {
+    statefulUi.selectedIssueId = id;
+    statefulUi.selectedMeasurementId = null;
+    statefulUi.selectedRfiId = null;
+    statefulUi.activeInspectorTab = "issues";
+    render();
+  }
+
+  function selectRfi(id) {
+    statefulUi.selectedRfiId = id;
+    statefulUi.selectedMeasurementId = null;
+    statefulUi.selectedIssueId = null;
+    statefulUi.activeInspectorTab = "selection";
+    render();
+  }
+
+  async function updateSelectedMeasurementStatus(status) {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) return notify("Select a measurement first.");
+    measurement.status = status;
+    measurement.updatedAt = nowIso();
+    addActivity(state, measurement.projectId, "drawing.measurement_status", `${titleCase(status)} drawing measurement ${measurement.label}.`);
+    await saveAndRender(`Measurement ${titleCase(status)}.`);
+  }
+
+  async function rejectSelectedMeasurement() {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) return notify("Select a measurement first.");
+    const reason = window.prompt("Reason for rejecting this measurement (optional):", measurement.rejectionReason || "");
+    measurement.status = "rejected";
+    measurement.rejectionReason = cleanText(reason);
+    measurement.updatedAt = nowIso();
+    addActivity(state, measurement.projectId, "drawing.measurement_rejected", `Rejected drawing measurement ${measurement.label}.`);
+    await saveAndRender("Measurement rejected.");
+  }
+
+  function openSelectedMeasurementEditor() {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) {
+      pushToast("Select a measurement first.");
+      render();
+      return;
+    }
+    openModal("drawingMeasurementEdit", measurement);
+  }
+
+  async function duplicateSelectedMeasurement() {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) return notify("Select a measurement first.");
+    const copy = { ...measurement, id: createId("drawing-measurement"), label: `${measurement.label} copy`, status: "draft", createdBy: "user", createdAt: nowIso(), updatedAt: nowIso() };
+    state.drawingMeasurements.push(copy);
+    statefulUi.selectedMeasurementId = copy.id;
+    await saveAndRender("Measurement duplicated.");
+  }
+
+  async function excludeSelectedMeasurement() {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) return notify("Select a measurement first.");
+    measurement.status = "rejected";
+    measurement.excluded = true;
+    measurement.updatedAt = nowIso();
+    await saveAndRender("Measurement excluded.");
+  }
+
+  async function approveHighConfidenceMeasurements() {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id];
+    let count = 0;
+    for (const measurement of filterByProject(state.drawingMeasurements, project.id)) {
+      if ((measurement.sheetId || measurement.drawingId) === sheetId && Number(measurement.confidence || 0) >= 85 && !["approved", "pushed_to_takeoff", "rejected"].includes(measurement.status)) {
+        measurement.status = "approved";
+        measurement.updatedAt = nowIso();
+        count += 1;
+      }
+    }
+    await saveAndRender(`Approved ${count} high-confidence measurement${count === 1 ? "" : "s"}.`);
+  }
+
+  async function pushSelectedToTakeoff() {
+    const measurement = findById(state.drawingMeasurements, statefulUi.selectedMeasurementId);
+    if (!measurement) return notify("Select a measurement first.");
+    await pushMeasurementsToTakeoff([measurement]);
+  }
+
+  async function pushApprovedToTakeoff() {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id];
+    const measurements = filterByProject(state.drawingMeasurements, project.id).filter((item) => (item.sheetId || item.drawingId) === sheetId && item.status === "approved");
+    if (!measurements.length) {
+      pushToast("No approved measurements are ready to push.");
+      render();
+      return;
+    }
+    if (!window.confirm(`Push ${measurements.length} approved measurement${measurements.length === 1 ? "" : "s"} to Takeoff?`)) return;
+    await pushMeasurementsToTakeoff(measurements);
+  }
+
+  async function pushMeasurementsToTakeoff(measurements) {
+    const project = getActiveProject();
+    if (!project) return;
+    const valid = measurements.filter((item) => item.status === "approved");
+    if (!valid.length) {
+      pushToast("Only approved measurements can be pushed to Takeoff.");
+      render();
+      return;
+    }
+    try {
+      const rows = await drawingServices.measurementService.pushToTakeoff({ projectId: project.id, measurements: valid });
+      state.takeoffMeasurements.push(...rows);
+      for (let index = 0; index < valid.length; index += 1) {
+        valid[index].status = "pushed_to_takeoff";
+        valid[index].linkedTakeoffItemId = rows[index]?.id || "";
+        valid[index].updatedAt = nowIso();
+      }
+      addActivity(state, project.id, "drawing.pushed_to_takeoff", `Pushed ${valid.length} approved drawing measurement${valid.length === 1 ? "" : "s"} to Takeoff.`);
+      await saveAndRender("Approved measurements pushed to Takeoff.");
+    } catch (_error) {
+      notify("Push to Takeoff failed.");
+    }
+  }
+
+  async function addRfiPin() {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id];
+    if (!sheetId) return notify("Select a sheet before adding an RFI pin.");
+    const rfi = drawingServices.rfiService.createRfiPin({
+      projectId: project.id,
+      sheetId,
+      linkedMeasurementId: statefulUi.selectedMeasurementId,
+      title: "Confirm scope condition",
+      description: "Draft RFI pin created from Drawing Viewer.",
+    });
+    state.rfis.push(rfi);
+    statefulUi.selectedRfiId = rfi.id;
+    statefulUi.selectedMeasurementId = null;
+    statefulUi.selectedIssueId = null;
+    await saveAndRender("RFI pin placeholder added.");
+  }
+
+  async function createRfiFromSelectedIssue() {
+    const project = getActiveProject();
+    if (!project) return;
+    const activeSheetId = state.settings.activeDrawingIdByProject[project.id];
+    const activeSheet = drawingServices.drawingService.getSheets(state, project.id).find((sheet) => sheet.id === activeSheetId);
+    const measurements = filterByProject(state.drawingMeasurements, project.id).filter((item) => (item.sheetId || item.drawingId) === activeSheetId);
+    const issue = getDrawingIssues(project.id, activeSheet, measurements).find((item) => item.id === statefulUi.selectedIssueId);
+    if (!issue) return notify("Select an issue first.");
+    const rfi = drawingServices.rfiService.createRfiFromIssue(issue);
+    state.rfis.push(rfi);
+    statefulUi.selectedRfiId = rfi.id;
+    statefulUi.selectedIssueId = null;
+    await saveAndRender("RFI created from issue.");
+  }
+
+  async function openDrawingSearchResult(target) {
+    const sheetId = target.dataset.sheetId;
+    if (sheetId) await selectDrawing(sheetId);
+    const type = target.dataset.type;
+    statefulUi.drawingSearchQuery = "";
+    if (type === "scope item") selectMeasurement(target.dataset.id);
+    else if (type === "rfi") selectRfi(target.dataset.id);
+    else if (type === "issue") selectIssue(target.dataset.id);
+    else render();
+  }
+
+  function getDrawingIssues(projectId, sheet, measurements) {
+    if (!sheet) return [];
+    const stored = filterByProject(state.drawingIssues, projectId).filter((item) => item.sheetId === sheet.id);
+    const derived = [];
+    if (!sheet.scaleCalibration || sheet.scaleCalibration.scaleSource === "missing") {
+      derived.push({
+        id: `issue-scale-${sheet.id}`,
+        projectId,
+        sheetId: sheet.id,
+        title: "Scale missing or unconfirmed",
+        description: "Calibrate or lock the sheet scale before relying on measured quantities.",
+        status: "Open",
+        severity: "high",
+        geometry: { kind: "point", x: 18, y: 18 },
+      });
+    }
+    for (const measurement of measurements.filter((item) => Number(item.confidence || 0) < 70)) {
+      derived.push({
+        id: `issue-low-${measurement.id}`,
+        projectId,
+        sheetId: sheet.id,
+        linkedMeasurementId: measurement.id,
+        title: `Low confidence: ${measurement.label}`,
+        description: (measurement.warnings || []).join(" ") || "Estimator review required before approval.",
+        status: "Open",
+        severity: "medium",
+        geometry: measurement.geometry?.kind === "point" ? measurement.geometry : { kind: "point", x: 31, y: 67 },
+      });
+    }
+    return [...stored, ...derived];
+  }
+
+  function getDrawingRfis(projectId, sheetId) {
+    return filterByProject(state.rfis, projectId).filter((item) => (item.sheetId || item.drawingId) === sheetId);
+  }
+
+  function filterSheetsForNavigator(sheets) {
+    const query = cleanText(statefulUi.sheetFilters.query).toLowerCase();
+    return sheets.filter((sheet) => {
+      const filter = statefulUi.sheetFilters.discipline;
+      if (filter && filter !== "all") {
+        if (["architectural", "structural", "mep"].includes(filter) && sheet.discipline !== filter) return false;
+        if (filter === "revised" && !sheet.statuses.includes("Changed by addendum")) return false;
+        if (filter === "needs-review" && !sheet.statuses.includes("Needs review") && !sheet.statuses.includes("Scale missing")) return false;
+        if (filter === "has-rfis" && !sheet.statuses.includes("Has RFI")) return false;
+        if (filter === "processed" && !sheet.statuses.includes("AI processed")) return false;
+        if (filter === "not-processed" && !sheet.statuses.includes("Not processed")) return false;
+      }
+      if (!query) return true;
+      return [sheet.sheetNumber, sheet.sheetTitle, sheet.discipline, sheet.revision, sheet.revisionName].join(" ").toLowerCase().includes(query);
+    });
+  }
+
+  function getDrawingSearchResults(project, active) {
+    const sheets = drawingServices.drawingService.getSheets(state, project.id);
+    const measurements = filterByProject(state.drawingMeasurements, project.id);
+    const rfis = filterByProject(state.rfis, project.id);
+    const issues = sheets.flatMap((sheet) => getDrawingIssues(project.id, sheet, measurements.filter((item) => (item.sheetId || item.drawingId) === sheet.id)));
+    return drawingServices.searchService.search({
+      query: statefulUi.drawingSearchQuery,
+      sheets,
+      measurements,
+      issues,
+      rfis,
+      activeSheetId: active?.id,
+    });
+  }
+
+  function measurementVisible(item) {
+    if (statefulUi.reviewFilter === "low-confidence" && Number(item.confidence || 0) >= 70) return false;
+    if (statefulUi.reviewFilter === "unapproved" && ["approved", "pushed_to_takeoff", "rejected"].includes(item.status)) return false;
+    const layerKey = drawingServices.measurementService.measurementLayerKey(item);
+    return statefulUi.visibleLayers[layerKey] !== false;
+  }
+
+  function issueVisible(item) {
+    if (item.severity === "high") return statefulUi.visibleLayers["low-confidence"] !== false;
+    return statefulUi.visibleLayers["low-confidence"] !== false;
+  }
+
+  function rfiVisible(item) {
+    if (statefulUi.visibleLayers.rfis === false) return false;
+    const status = String(item.status || "").toLowerCase();
+    if (statefulUi.rfiFilter === "resolved") return ["answered", "closed", "resolved"].includes(status);
+    if (statefulUi.rfiFilter === "unresolved") return !["answered", "closed", "resolved"].includes(status);
+    return true;
+  }
+
+  function selectedClass(type, id) {
+    if (type === "measurement" && statefulUi.selectedMeasurementId === id) return "selected";
+    if (type === "issue" && statefulUi.selectedIssueId === id) return "selected";
+    if (type === "rfi" && statefulUi.selectedRfiId === id) return "selected";
+    return "";
+  }
+
+  function confidenceClass(confidence) {
+    const value = Number(confidence);
+    if (!Number.isFinite(value)) return "confidence-blocked";
+    if (value >= 85) return "confidence-high";
+    if (value >= 70) return "confidence-medium";
+    return "confidence-low";
+  }
+
+  function getSelectedContext(active, measurements, issues, rfis) {
+    const measurement = measurements.find((item) => item.id === statefulUi.selectedMeasurementId);
+    if (measurement) return { kind: "measurement", item: measurement, label: measurement.label };
+    const issue = issues.find((item) => item.id === statefulUi.selectedIssueId);
+    if (issue) return { kind: "issue", item: issue, label: issue.title };
+    const rfi = rfis.find((item) => item.id === statefulUi.selectedRfiId);
+    if (rfi) return { kind: "rfi", item: rfi, label: rfi.title };
+    return null;
+  }
+
+  function getReviewStats(measurements) {
+    return {
+      detected: measurements.filter((item) => item.status === "detected").length,
+      reviewed: measurements.filter((item) => item.status === "reviewed" || item.status === "edited").length,
+      approved: measurements.filter((item) => item.status === "approved").length,
+      rejected: measurements.filter((item) => item.status === "rejected").length,
+      pushed: measurements.filter((item) => item.status === "pushed_to_takeoff").length,
+      needsReview: measurements.filter((item) => ["detected", "reviewed", "edited", "draft"].includes(item.status)).length,
+    };
+  }
+
+  function num(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(0, Math.min(100, numeric));
   }
 
   async function ensurePreviewUrl(id) {
@@ -1381,7 +2485,7 @@
       revokePreviewUrl(drawingId);
     }
     state.projects = state.projects.filter((item) => item.id !== id);
-    for (const key of ["drawings", "rooms", "floors", "buildings", "scopes", "scopeDetections", "takeoffMeasurements", "estimateLineItems", "rfis", "riskItems", "exports", "activities"]) {
+    for (const key of ["drawings", "rooms", "floors", "buildings", "scopes", "scopeDetections", "drawingMeasurements", "drawingIssues", "drawingScaleCalibrations", "drawingRevisionReviews", "takeoffMeasurements", "estimateLineItems", "rfis", "riskItems", "exports", "activities"]) {
       state[key] = state[key].filter((item) => item.projectId !== id);
     }
     if (state.settings.activeProjectId === id) {
@@ -1458,6 +2562,10 @@
       buildings: new Map(),
       scopes: new Map(),
       scopeDetections: new Map(),
+      drawingMeasurements: new Map(),
+      drawingIssues: new Map(),
+      drawingScaleCalibrations: new Map(),
+      drawingRevisionReviews: new Map(),
       takeoffMeasurements: new Map(),
       estimateLineItems: new Map(),
       rfis: new Map(),
@@ -1487,15 +2595,32 @@
       row.promotedMeasurementId = remapImported(maps.takeoffMeasurements, row.promotedMeasurementId);
       row.promotedEstimateItemId = remapImported(maps.estimateLineItems, row.promotedEstimateItemId);
     }
+    for (const row of filterByProject(state.drawingMeasurements, projectId)) {
+      row.sheetId = remapImported(maps.drawings, row.sheetId);
+      row.drawingId = remapImported(maps.drawings, row.drawingId);
+      row.linkedTakeoffItemId = remapImported(maps.takeoffMeasurements, row.linkedTakeoffItemId);
+    }
+    for (const row of filterByProject(state.drawingIssues, projectId)) {
+      row.sheetId = remapImported(maps.drawings, row.sheetId);
+      row.linkedMeasurementId = remapImported(maps.drawingMeasurements, row.linkedMeasurementId);
+    }
+    for (const row of filterByProject(state.drawingScaleCalibrations, projectId)) {
+      row.sheetId = remapImported(maps.drawings, row.sheetId);
+    }
+    for (const row of filterByProject(state.drawingRevisionReviews, projectId)) {
+      row.sheetId = remapImported(maps.drawings, row.sheetId);
+    }
     for (const row of filterByProject(state.estimateLineItems, projectId)) {
       row.sourceMeasurementId = remapImported(maps.takeoffMeasurements, row.sourceMeasurementId);
       row.scopeId = remapImported(maps.scopes, row.scopeId);
     }
     for (const row of filterByProject(state.rfis, projectId)) {
+      row.sheetId = remapImported(maps.drawings, row.sheetId);
       row.drawingId = remapImported(maps.drawings, row.drawingId);
       row.roomId = remapImported(maps.rooms, row.roomId);
       row.scopeId = remapImported(maps.scopes, row.scopeId);
       row.estimateItemId = remapImported(maps.estimateLineItems, row.estimateItemId);
+      row.linkedMeasurementId = remapImported(maps.drawingMeasurements, row.linkedMeasurementId);
     }
     for (const row of filterByProject(state.riskItems, projectId)) {
       if (row.referenceType === "takeoff") row.referenceId = remapImported(maps.takeoffMeasurements, row.referenceId);
@@ -1517,12 +2642,20 @@
       floor: "takeoff",
       building: "takeoff",
       scope: "scope-detection",
+      "drawing-measurement": "drawing-viewer",
+      "drawing-issue": "drawing-viewer",
       takeoff: "takeoff",
       estimate: "estimate",
       rfi: "questions-rfis",
     };
     statefulUi.searchQuery = "";
     if (type === "drawing") selectDrawing(id);
+    if (type === "drawing-measurement") {
+      const measurement = findById(state.drawingMeasurements, id);
+      if (measurement?.sheetId || measurement?.drawingId) selectDrawing(measurement.sheetId || measurement.drawingId);
+      statefulUi.selectedMeasurementId = id;
+    }
+    if (type === "drawing-issue") statefulUi.selectedIssueId = id;
     navigate(routeMap[type] || "dashboard");
   }
 
@@ -1581,6 +2714,98 @@
       state.scopes.push(row);
     }
     return row;
+  }
+
+  function handleKeyboardShortcuts(event) {
+    const target = event.target;
+    const isTyping = target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b" && !event.shiftKey) {
+      event.preventDefault();
+      toggleGlobalSidebar();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      toggleSheetNavigator();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === ".") {
+      event.preventDefault();
+      toggleRightInspector();
+      return;
+    }
+    if (isTyping || statefulUi.route !== "drawing-viewer") return;
+    const key = event.key.toLowerCase();
+    if (key === "v") setDrawingMode("view");
+    if (key === "m") setDrawingMode("measure");
+    if (key === "a") {
+      setDrawingMode("measure");
+      statefulUi.selectedMeasurementTool = "area";
+      render();
+    }
+    if (key === "l") {
+      setDrawingMode("measure");
+      statefulUi.selectedMeasurementTool = "line";
+      render();
+    }
+    if (key === "c") {
+      setDrawingMode("measure");
+      statefulUi.selectedMeasurementTool = "count";
+      render();
+    }
+    if (key === "r") {
+      setDrawingMode("markup-rfi");
+      statefulUi.selectedMeasurementTool = "rfi";
+      render();
+    }
+    if (key === "/" || key === "s") {
+      event.preventDefault();
+      document.querySelector("[data-role='drawing-search']")?.focus();
+    }
+    if (key === "escape") {
+      statefulUi.selectedMeasurementTool = "";
+      statefulUi.selectedMeasurementId = null;
+      statefulUi.selectedIssueId = null;
+      statefulUi.selectedRfiId = null;
+      render();
+    }
+  }
+
+  function readPreference(key, fallback) {
+    try {
+      const value = localStorage.getItem(`takeoff.${key}`);
+      if (value == null) return fallback;
+      if (value === "true") return true;
+      if (value === "false") return false;
+      return value;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+
+  function writePreference(key, value) {
+    try {
+      localStorage.setItem(`takeoff.${key}`, String(value));
+    } catch (_error) {
+      // Local storage may be unavailable in restricted embedded browser modes.
+    }
+  }
+
+  function readJsonPreference(key, fallback) {
+    try {
+      const value = localStorage.getItem(`takeoff.${key}`);
+      return value ? { ...fallback, ...JSON.parse(value) } : fallback;
+    } catch (_error) {
+      return fallback;
+    }
+  }
+
+  function writeJsonPreference(key, value) {
+    try {
+      localStorage.setItem(`takeoff.${key}`, JSON.stringify(value));
+    } catch (_error) {
+      // Local storage may be unavailable in restricted embedded browser modes.
+    }
   }
 
   function getActiveProject() {
@@ -1658,6 +2883,11 @@
       { value: "ceilings", label: "Ceilings" },
       { value: "carpentry", label: "Carpentry" },
     ];
+  }
+
+  function notify(message) {
+    pushToast(message);
+    render();
   }
 
   function pushToast(message) {
