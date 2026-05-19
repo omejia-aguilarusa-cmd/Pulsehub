@@ -20,6 +20,7 @@ datas = [
     (str(_assets_src / "workspace_styles.css"), "takeoff_pro/ui/assets"),
     (str(_assets_src / "workspace_logic.js"), "takeoff_pro/ui/assets"),
     (str(_assets_src / "workspace_app.js"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "drawing_workspace_services.js"), "takeoff_pro/ui/assets"),
 ]
 binaries = []
 hiddenimports = [
