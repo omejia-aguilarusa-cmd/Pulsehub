@@ -58,7 +58,6 @@
     error: "",
     route: getRoute(),
     sidebarOpen: false,
-    globalSidebarCollapsed: readPreference("globalSidebarCollapsed", false),
     searchQuery: "",
     selectedDrawingId: null,
     viewerPageByDrawingId: {},
@@ -215,7 +214,7 @@
     }
     const project = getActiveProject();
     appRoot.innerHTML = `
-      <div class="app-shell ${statefulUi.globalSidebarCollapsed ? "sidebar-collapsed" : ""} ${statefulUi.focusModeEnabled && statefulUi.route === "drawing-viewer" ? "drawing-focus-mode" : ""}">
+      <div class="app-shell ${statefulUi.focusModeEnabled && statefulUi.route === "drawing-viewer" ? "drawing-focus-mode" : ""}">
         ${renderSidebar(project)}
         ${statefulUi.sidebarOpen ? `<button class="mobile-overlay" data-action="close-sidebar" aria-label="Close navigation"></button>` : ""}
         <main class="main-shell">
@@ -236,11 +235,10 @@
     const userEmail = cleanText(state.settings.userEmail);
     const userInitials = userName ? initials(userName) : "—";
     return `
-      <aside class="sidebar ${statefulUi.sidebarOpen ? "open" : ""} ${statefulUi.globalSidebarCollapsed ? "collapsed" : ""}" aria-label="Primary navigation" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">
+      <aside class="sidebar ${statefulUi.sidebarOpen ? "open" : ""}" aria-label="Project navigation">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true">▲</div>
           <div class="brand-copy"><strong>Takeoff</strong><span>Estimating Workspace</span></div>
-          <button class="sidebar-collapse-toggle" data-action="toggle-global-sidebar" aria-label="${statefulUi.globalSidebarCollapsed ? "Expand navigation" : "Collapse navigation"}" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">${statefulUi.globalSidebarCollapsed ? ">" : "<"}</button>
         </div>
         <div class="sidebar-scroll">
           <button class="sidebar-action" data-action="open-project-modal" aria-label="Create new project"><span class="nav-icon">＋</span><span class="nav-text">New project</span></button>
@@ -294,7 +292,6 @@
       <header class="topbar">
         <div class="topbar-left">
           <button class="menu-toggle" data-action="toggle-sidebar" aria-label="Toggle navigation">☰</button>
-          <button class="topbar-sidebar-toggle" data-action="toggle-global-sidebar" aria-label="${statefulUi.globalSidebarCollapsed ? "Expand global sidebar" : "Collapse global sidebar"}" aria-expanded="${statefulUi.globalSidebarCollapsed ? "false" : "true"}">${statefulUi.globalSidebarCollapsed ? ">" : "<"}</button>
           <div class="breadcrumb"><strong>${escapeHtml(project ? project.name : "Workspace")}</strong><span>/</span><span>${escapeHtml(routeLabel)}</span></div>
           ${project ? `<span class="status-pill"><span class="status-dot"></span>${escapeHtml(status)}</span>` : ""}
         </div>
@@ -1311,7 +1308,6 @@
 
     switch (action) {
       case "toggle-sidebar": statefulUi.sidebarOpen = !statefulUi.sidebarOpen; render(); return;
-      case "toggle-global-sidebar": toggleGlobalSidebar(); return;
       case "close-sidebar": statefulUi.sidebarOpen = false; render(); return;
       case "open-project-modal": openModal("project"); return;
       case "close-modal": closeModal(); return;
@@ -1616,12 +1612,6 @@
     render();
   }
 
-  function toggleGlobalSidebar() {
-    statefulUi.globalSidebarCollapsed = !statefulUi.globalSidebarCollapsed;
-    writePreference("globalSidebarCollapsed", statefulUi.globalSidebarCollapsed);
-    render();
-  }
-
   function toggleSheetNavigator() {
     statefulUi.sheetNavigatorCollapsed = !statefulUi.sheetNavigatorCollapsed;
     writePreference("sheetNavigatorCollapsed", statefulUi.sheetNavigatorCollapsed);
@@ -1638,21 +1628,17 @@
     statefulUi.focusModeEnabled = !statefulUi.focusModeEnabled;
     if (statefulUi.focusModeEnabled) {
       statefulUi.focusRestoreLayout = {
-        globalSidebarCollapsed: statefulUi.globalSidebarCollapsed,
         sheetNavigatorCollapsed: statefulUi.sheetNavigatorCollapsed,
         rightInspectorCollapsed: statefulUi.rightInspectorCollapsed,
       };
-      statefulUi.globalSidebarCollapsed = true;
       statefulUi.sheetNavigatorCollapsed = true;
       statefulUi.rightInspectorCollapsed = true;
     } else {
       const restore = statefulUi.focusRestoreLayout || {};
-      statefulUi.globalSidebarCollapsed = Boolean(restore.globalSidebarCollapsed);
       statefulUi.sheetNavigatorCollapsed = Boolean(restore.sheetNavigatorCollapsed);
       statefulUi.rightInspectorCollapsed = Boolean(restore.rightInspectorCollapsed);
       statefulUi.focusRestoreLayout = null;
     }
-    writePreference("globalSidebarCollapsed", statefulUi.globalSidebarCollapsed);
     writePreference("sheetNavigatorCollapsed", statefulUi.sheetNavigatorCollapsed);
     writePreference("rightInspectorCollapsed", statefulUi.rightInspectorCollapsed);
     render();
@@ -2719,11 +2705,6 @@
   function handleKeyboardShortcuts(event) {
     const target = event.target;
     const isTyping = target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b" && !event.shiftKey) {
-      event.preventDefault();
-      toggleGlobalSidebar();
-      return;
-    }
     if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "b") {
       event.preventDefault();
       toggleSheetNavigator();

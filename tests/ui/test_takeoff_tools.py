@@ -33,3 +33,15 @@ def test_workspace_logic_declares_all_required_routes() -> None:
         "settings",
     ):
         assert route in logic
+
+
+def test_workspace_shell_uses_single_project_sidebar() -> None:
+    app = (ASSET_ROOT / "workspace_app.js").read_text(encoding="utf-8")
+    styles = (ASSET_ROOT / "workspace_styles.css").read_text(encoding="utf-8")
+
+    assert 'aria-label="Project navigation"' in app
+    assert "toggle-global-sidebar" not in app
+    assert "globalSidebarCollapsed" not in app
+    assert "sidebar-collapsed" not in styles
+    assert ".sidebar.collapsed" not in styles
+    assert "grid-template-columns: 240px minmax(0, 1fr);" in styles

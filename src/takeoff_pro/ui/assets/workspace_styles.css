@@ -61,10 +61,6 @@ textarea:focus-visible {
   grid-template-columns: 240px minmax(0, 1fr);
 }
 
-.app-shell.sidebar-collapsed {
-  grid-template-columns: 72px minmax(0, 1fr);
-}
-
 .sidebar {
   min-height: 100vh;
   border-right: 1px solid var(--line);
@@ -75,72 +71,12 @@ textarea:focus-visible {
   top: 0;
 }
 
-.sidebar.collapsed {
-  align-items: stretch;
-}
-
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 22px 18px 16px;
-}
-
-.sidebar-collapse-toggle,
-.topbar-sidebar-toggle {
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: #fff;
-  color: #4b5563;
-}
-
-.sidebar-collapse-toggle {
-  margin-left: auto;
-}
-
-.topbar-sidebar-toggle {
-  display: inline-grid;
-  place-items: center;
-}
-
-.sidebar.collapsed .brand {
-  justify-content: center;
-  gap: 0;
-  padding-inline: 10px;
-}
-
-.sidebar.collapsed .brand-mark {
-  display: none;
-}
-
-.sidebar.collapsed .sidebar-collapse-toggle {
-  margin-left: 0;
-}
-
-.sidebar.collapsed .brand-copy,
-.sidebar.collapsed .nav-text,
-.sidebar.collapsed .nav-badge,
-.sidebar.collapsed .sidebar-label,
-.sidebar.collapsed .sidebar-project,
-.sidebar.collapsed .user-meta {
-  display: none;
-}
-
-.sidebar.collapsed .sidebar-scroll {
-  padding-inline: 8px;
-}
-
-.sidebar.collapsed .nav-link,
-.sidebar.collapsed .sidebar-action,
-.sidebar.collapsed .user-button {
-  justify-content: center;
-  padding-inline: 0;
-}
-
-.sidebar.collapsed .user-card {
-  margin-inline: 8px;
+  min-height: 68px;
+  padding: 16px 18px;
 }
 
 .brand-mark {
@@ -480,12 +416,12 @@ textarea:focus-visible {
 }
 
 .content {
-  padding: 22px;
+  padding: 20px;
 }
 
 .page {
   display: grid;
-  gap: 18px;
+  gap: 16px;
 }
 
 .page-header {
@@ -1710,10 +1646,6 @@ polyline.measurement-overlay {
     grid-template-columns: 1fr;
   }
 
-  .app-shell.sidebar-collapsed {
-    grid-template-columns: 1fr;
-  }
-
   .sidebar {
     position: fixed;
     inset: 0 auto 0 0;
@@ -1739,10 +1671,6 @@ polyline.measurement-overlay {
   .menu-toggle {
     display: inline-grid;
     place-items: center;
-  }
-
-  .topbar-sidebar-toggle {
-    display: none;
   }
 
   .topbar {
