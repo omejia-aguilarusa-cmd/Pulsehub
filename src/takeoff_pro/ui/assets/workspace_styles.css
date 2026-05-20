@@ -174,9 +174,18 @@ textarea:focus-visible {
 
 .nav-icon {
   width: 18px;
+  height: 18px;
   color: #73757d;
   text-align: center;
   flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+}
+
+.nav-icon svg {
+  display: block;
+  width: 18px;
+  height: 18px;
 }
 
 .nav-text {

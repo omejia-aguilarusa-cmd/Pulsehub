@@ -244,28 +244,28 @@
           <div class="brand-copy"><strong>Takeoff</strong><span>Estimating Workspace</span></div>
         </div>
         <div class="sidebar-scroll">
-          <button class="sidebar-action" data-action="open-project-modal" aria-label="Create new project"><span class="nav-icon">＋</span><span class="nav-text">New project</span></button>
+          <button class="sidebar-action" data-action="open-project-modal" aria-label="Create new project"><span class="nav-icon" aria-hidden="true">${iconSvg("plus")}</span><span class="nav-text">New project</span></button>
           <section class="sidebar-section">
             <p class="sidebar-label">Project</p>
             <p class="sidebar-project">${escapeHtml(projectLabel)}</p>
             <nav class="nav-list" aria-label="Workspace pages">
-              ${renderNavLink("dashboard", "▦", "Dashboard")}
-              ${renderNavLink("documents", "▤", "Documents")}
-              ${renderNavLink("drawing-viewer", "▧", "Drawing viewer")}
-              ${renderNavLink("takeoff", "▦", "Takeoff")}
-              ${renderNavLink("scope-detection", "☑", "Scope detection")}
-              ${renderNavLink("questions-rfis", "?", "Questions / RFIs", unresolvedRfis)}
-              ${renderNavLink("estimate", "▤", "Estimate")}
-              ${renderNavLink("risk-confidence", "△", "Risk & confidence")}
-              ${renderNavLink("output-center", "⇧", "Output center")}
+              ${renderNavLink("dashboard", "Dashboard")}
+              ${renderNavLink("documents", "Documents")}
+              ${renderNavLink("drawing-viewer", "Drawing viewer")}
+              ${renderNavLink("takeoff", "Takeoff")}
+              ${renderNavLink("scope-detection", "Scope detection")}
+              ${renderNavLink("questions-rfis", "Questions / RFIs", unresolvedRfis)}
+              ${renderNavLink("estimate", "Estimate")}
+              ${renderNavLink("risk-confidence", "Risk & confidence")}
+              ${renderNavLink("output-center", "Output center")}
             </nav>
           </section>
           <section class="sidebar-section">
             <p class="sidebar-label">Company</p>
             <nav class="nav-list" aria-label="Company pages">
-              ${renderNavLink("company-memory", "◔", "Company memory")}
-              ${renderNavLink("past-projects", "▱", "Past projects")}
-              ${renderNavLink("settings", "⚙", "Settings")}
+              ${renderNavLink("company-memory", "Company memory")}
+              ${renderNavLink("past-projects", "Past projects")}
+              ${renderNavLink("settings", "Settings")}
             </nav>
           </section>
         </div>
@@ -282,9 +282,28 @@
     `;
   }
 
-  function renderNavLink(route, icon, label, badge) {
+  function renderNavLink(route, label, badge) {
     const active = statefulUi.route === route ? "active" : "";
-    return `<a href="#/${route}" class="nav-link ${active}" data-route="${route}"><span class="nav-icon" aria-hidden="true">${icon}</span><span class="nav-text">${label}</span>${badge ? `<span class="nav-badge">${badge}</span>` : ""}</a>`;
+    return `<a href="#/${route}" class="nav-link ${active}" data-route="${route}"><span class="nav-icon" aria-hidden="true">${iconSvg(route)}</span><span class="nav-text">${label}</span>${badge ? `<span class="nav-badge">${badge}</span>` : ""}</a>`;
+  }
+
+  function iconSvg(name) {
+    const paths = {
+      plus: '<path d="M12 5v14M5 12h14"/>',
+      dashboard: '<rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="4" width="6" height="6" rx="1.2"/><rect x="4" y="14" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/>',
+      documents: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/><path d="M9.5 12h5M9.5 16h5"/>',
+      "drawing-viewer": '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="m7 16 4-4 3 3 2-2 3 3"/><circle cx="9" cy="9" r="1.3"/>',
+      takeoff: '<path d="M4 5h16M4 11h16M4 17h16M8 5v14M14 5v14"/>',
+      "scope-detection": '<path d="M5 12.5 9.5 17 19 7"/><rect x="4" y="4" width="16" height="16" rx="2"/>',
+      "questions-rfis": '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.8 2.8 0 0 1 5.2 1.4c0 2-2.7 2.2-2.7 4"/><path d="M12 18h.01"/>',
+      estimate: '<path d="M8 3h8l3 3v15H8z"/><path d="M16 3v4h4"/><path d="M10.5 11h5M10.5 15h5M10.5 19h3"/>',
+      "risk-confidence": '<path d="M12 4 21 20H3z"/><path d="M12 9v5M12 17h.01"/>',
+      "output-center": '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
+      "company-memory": '<path d="M8 4h8l2 3v10l-2 3H8l-2-3V7z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+      "past-projects": '<path d="M4 7h16"/><path d="M6 7l1.5 13h9L18 7"/><path d="M9 7V4h6v3"/><path d="M10 11h4"/>',
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9 7 7M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"/>',
+    };
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">${paths[name] || paths.dashboard}</svg>`;
   }
 
   function renderProjectHeader(project) {
