@@ -7,6 +7,8 @@
     averageConfidence,
     buildProjectCsv,
     buildProjectJson,
+    aiTakeoffRooms,
+    calculateAiTakeoffTotals,
     calculateEstimateLine,
     calculateTakeoffSummary,
     cleanText,
@@ -76,6 +78,7 @@
     selectedMeasurementTool: "",
     activeInspectorTab: "selection",
     aiProcessingState: null,
+    aiTakeoffStage: "",
     sheetFilters: {
       discipline: "all",
       query: "",
@@ -237,7 +240,7 @@
     return `
       <aside class="sidebar ${statefulUi.sidebarOpen ? "open" : ""}" aria-label="Project navigation">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">▲</div>
+          <div class="brand-mark" aria-hidden="true"><img src="icons/takeoffpro-mark-transparent.svg" alt=""></div>
           <div class="brand-copy"><strong>Takeoff</strong><span>Estimating Workspace</span></div>
         </div>
         <div class="sidebar-scroll">
@@ -468,10 +471,12 @@
             ${renderDrawingSearchResults(results)}
           </div>
           <button class="button" data-action="share-placeholder" aria-label="Share drawing placeholder">Share</button>
+          <button class="button primary" data-action="run-ai-takeoff" ${active ? "" : "disabled"} aria-label="Run AI Takeoff">Run AI Takeoff</button>
           <button class="button" data-action="open-export-modal" aria-label="Export drawing data placeholder">Export</button>
           <button class="button ${statefulUi.focusModeEnabled ? "primary" : ""}" data-action="toggle-focus-mode" aria-label="${statefulUi.focusModeEnabled ? "Exit focus mode" : "Enter focus mode"}">${statefulUi.focusModeEnabled ? "Exit focus" : "Focus"}</button>
         </div>
       </header>
+      ${statefulUi.aiProcessingState?.status === "processing" ? `<div class="ai-run-strip"><strong>${escapeHtml(statefulUi.aiTakeoffStage || "Running AI Takeoff")}</strong><div class="ai-progress compact"><span style="width:${Number(statefulUi.aiProcessingState.progress || 10)}%"></span></div></div>` : ""}
       ${revision ? `<div class="addendum-strip"><strong>${escapeHtml(revision.addendumName)}</strong><span>${escapeHtml(revision.quantityDeltas[0]?.cause || "Revision delta available.")}</span></div>` : ""}
     `;
   }
@@ -849,6 +854,7 @@
     const floors = filterByProject(state.floors, project.id);
     const buildings = filterByProject(state.buildings, project.id);
     const scopes = filterByProject(state.scopes, project.id);
+    const latestAiRun = latestAiTakeoffRun(project.id);
     return `
       <div class="page">
         ${renderPageHeader("Takeoff", "Create, edit, filter, and review persisted takeoff measurements.", `<button class="button primary" data-action="open-measurement-modal">New takeoff row</button>`)}
@@ -858,6 +864,7 @@
           ${metricCard("Paint SF", formatNumber(summary.paintSf), "Calculated from rows")}
           ${metricCard("Average confidence", summary.averageConfidence == null ? "—" : `${summary.averageConfidence}%`, `${summary.lowConfidenceCount} low-confidence item${summary.lowConfidenceCount === 1 ? "" : "s"}`)}
         </div>
+        ${renderAiQuantitiesPanel(project, latestAiRun)}
         <section class="panel">
           <div class="panel-header"><div><h2>Filters</h2><p>Room, floor, building, scope, and trade filters all apply to real records.</p></div></div>
           <div class="panel-body stack">
@@ -877,6 +884,35 @@
           ${filtered.length ? `<div class="table-wrap"><table><thead><tr><th>Location</th><th>Floor</th><th>Building</th><th>Scope</th><th>Quantity</th><th>Wall SF</th><th>Ceiling SF</th><th>Paint SF</th><th>Confidence</th><th>Actions</th></tr></thead><tbody>${filtered.map((row) => `<tr><td>${escapeHtml(row.roomName || row.name)}</td><td>${escapeHtml(row.floorName || "—")}</td><td>${escapeHtml(row.buildingName || "—")}</td><td>${escapeHtml(row.scopeName || titleCase(row.scopeCategory || ""))}</td><td>${formatNumber(row.quantity)} ${escapeHtml(row.unit || "")}</td><td>${formatNumber(row.wallSf)}</td><td>${formatNumber(row.ceilingSf)}</td><td>${formatNumber(row.paintSf)}</td><td>${renderConfidence(row.confidence)}</td><td><div class="inline-actions"><button class="button ghost" data-action="edit-measurement" data-id="${row.id}" aria-label="Edit ${escapeAttribute(row.name)}">Details</button><button class="button ghost" data-action="delete-measurement" data-id="${row.id}" aria-label="Delete ${escapeAttribute(row.name)}">Delete</button></div></td></tr>`).join("")}</tbody></table></div>` : `<div class="panel-body">${renderInlineEmpty("No takeoff rows yet.", "Add the first measurement or adjust the filters to see saved rows.", `<button class="button primary" data-action="open-measurement-modal">New takeoff row</button>`)}</div>`}
         </section>
       </div>
+    `;
+  }
+
+  function renderAiQuantitiesPanel(project, run) {
+    const totals = run ? (run.totals || calculateAiTakeoffTotals(run)) : null;
+    const rooms = run ? aiTakeoffRooms(run) : [];
+    const warnings = run ? [...(run.warnings || []), ...(run.pages || []).flatMap((page) => page.warnings || [])] : [];
+    return `
+      <section class="panel quantities-panel">
+        <div class="panel-header">
+          <div><h2>AI painting quantities</h2><p>${run ? `${titleCase(run.status || "unknown")} - ${formatDateTime(run.updatedAt || run.createdAt)}` : "No AI takeoff run yet"}</p></div>
+          <div class="inline-actions">
+            <button class="button" data-action="run-ai-takeoff">Run AI Takeoff</button>
+            <button class="button" data-action="export-ai-takeoff-csv" ${run ? "" : "disabled"}>Export AI CSV</button>
+          </div>
+        </div>
+        <div class="panel-body stack">
+          ${run ? `<div class="summary-grid">
+            ${metricMini("Wall SF", formatNumber(totals.wallSf))}
+            ${metricMini("Ceiling SF", formatNumber(totals.ceilingSf))}
+            ${metricMini("Doors", formatNumber(totals.doorCount))}
+            ${metricMini("Windows", formatNumber(totals.windowCount))}
+            ${metricMini("Trim LF", formatNumber(totals.trimLf))}
+            ${metricMini("Confidence", run.confidenceScore ? `${formatNumber(run.confidenceScore)}%` : "Unavailable")}
+          </div>
+          ${warnings.length ? `<div class="notice warn">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
+          ${rooms.length ? `<div class="table-wrap"><table><thead><tr><th>Room</th><th>Page</th><th>Wall SF</th><th>Ceiling SF</th><th>Doors</th><th>Windows</th><th>Trim LF</th><th>Confidence</th><th>Assumptions</th></tr></thead><tbody>${rooms.map((room) => `<tr><td>${escapeHtml(room.name)}</td><td>${escapeHtml(entityName(state.drawings, room.pageId) || room.pageId || "â€”")}</td><td>${formatNumber(room.wallSf)}</td><td>${formatNumber(room.ceilingSf)}</td><td>${formatNumber(room.doorCount)}</td><td>${formatNumber(room.windowCount)}</td><td>${formatNumber(room.trimLf)}</td><td>${renderConfidence(room.confidence)}</td><td>${escapeHtml((room.assumptions || []).join("; ") || "None recorded")}</td></tr>`).join("")}</tbody></table></div>` : renderInlineEmpty("No AI rooms available.", run.status === "not_configured" ? "Configure an AI provider to extract room-by-room quantities from plan images. Manual takeoff remains available." : "The latest AI run returned no rooms for review.")}` : renderInlineEmpty("No AI takeoff run yet.", "Run AI Takeoff from the drawing viewer or this panel to create a painting-specific review result.", `<button class="button primary" data-action="run-ai-takeoff">Run AI Takeoff</button>`)}
+        </div>
+      </section>
     `;
   }
 
@@ -1022,6 +1058,7 @@
             ${field("Default markup %", "defaultMarkupPercent", state.settings.defaultMarkupPercent, "number")}
             ${field("Default tax %", "defaultTaxPercent", state.settings.defaultTaxPercent, "number")}
             ${field("Low-confidence threshold %", "lowConfidenceThreshold", state.settings.lowConfidenceThreshold, "number")}
+            ${selectField("AI takeoff", "aiTakeoffEnabled", state.settings.aiTakeoffEnabled ? "true" : "false", [{ value: "true", label: "Enabled" }, { value: "false", label: "Disabled" }])}
             ${field("Your name", "userName", state.settings.userName)}
             ${field("Your email", "userEmail", state.settings.userEmail, "email")}
           </div>
@@ -1146,6 +1183,7 @@
             { value: "Missing", label: "Missing" },
           ])}
           ${field("Two-point real distance", "twoPointDistance", existing.twoPointDistance || "", "text")}
+          ${field("Custom pixels per foot", "pixelsPerFoot", existing.pixelsPerFoot || "", "number")}
           <label class="field"><span>Lock approved scale</span><select name="scaleLocked"><option value="false" ${existing.scaleLocked ? "" : "selected"}>Unlocked</option><option value="true" ${existing.scaleLocked ? "selected" : ""}>Locked</option></select></label>
           ${field("Calibrated by", "calibratedBy", existing.calibratedBy || state.settings.userName || "Estimator")}
           <label class="field full"><span>Multi-scale zones</span><textarea name="multiScaleZones" placeholder="Placeholder for future enlarged plan/detail zones">${escapeHtml((existing.multiScaleZones || []).join("\n"))}</textarea></label>
@@ -1329,6 +1367,8 @@
       case "set-sheet-filter": statefulUi.sheetFilters.discipline = target.dataset.filter || "all"; render(); return;
       case "set-inspector-tab": statefulUi.activeInspectorTab = target.dataset.tab || "selection"; render(); return;
       case "open-ai-measurement-modal": openModal("aiMeasurement"); return;
+      case "run-ai-takeoff": await runAiTakeoff(); return;
+      case "export-ai-takeoff-csv": await exportAiTakeoffCsv(); return;
       case "open-scale-modal": openScaleModal(); return;
       case "add-sample-manual-measurement": await addSampleManualMeasurement(); return;
       case "select-measurement": selectMeasurement(id); return;
@@ -1530,6 +1570,9 @@
         mimeType: file.type || inferMimeType(file.name),
         extension: file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "",
         size: file.size,
+        pageCount: null,
+        processingStatus: isPdf({ mimeType: file.type || inferMimeType(file.name), extension: file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "" }) ? "stored_pdf_pending_native_processing" : "stored",
+        pageImages: [],
         uploadedAt: nowIso(),
         createdAt: nowIso(),
         updatedAt: nowIso(),
@@ -1709,6 +1752,101 @@
     return [data.currentSheetId].filter(Boolean);
   }
 
+  async function runAiTakeoff() {
+    const project = getActiveProject();
+    if (!project) return;
+    if (!state.settings.aiTakeoffEnabled) {
+      pushToast("AI takeoff is disabled in settings.");
+      render();
+      return;
+    }
+    const sheets = drawingServices.drawingService.getSheets(state, project.id);
+    const activeId = state.settings.activeDrawingIdByProject[project.id] || sheets[0]?.id || "";
+    if (!activeId) {
+      pushToast("Upload and select a drawing before running AI takeoff.");
+      render();
+      return;
+    }
+    statefulUi.aiTakeoffStage = "Uploading";
+    statefulUi.aiProcessingState = { status: "processing", progress: 8, sheetStatuses: [{ sheetId: activeId, status: "queued" }] };
+    render();
+    try {
+      const run = await drawingServices.measurementService.runPaintingTakeoff({
+        projectId: project.id,
+        pageIds: [activeId],
+        scope: "painting",
+        ceilingHeightFt: 9,
+        includeDoors: true,
+        includeWindows: true,
+        includeTrim: true,
+        onProgress: (stage, progress) => {
+          statefulUi.aiTakeoffStage = stage;
+          statefulUi.aiProcessingState = { status: "processing", progress, sheetStatuses: [{ sheetId: activeId, status: stage }] };
+          render();
+        },
+      });
+      state.aiTakeoffRuns.push(run);
+      statefulUi.aiTakeoffStage = "Complete";
+      statefulUi.aiProcessingState = { status: "complete", progress: 100, sheetStatuses: [{ sheetId: activeId, status: "complete" }] };
+      addActivity(state, project.id, "ai.takeoff", `AI painting takeoff ${run.status === "complete" ? "completed" : "recorded"} for 1 sheet.`);
+      await saveAndRender(run.status === "not_configured" ? "AI provider not configured. Manual takeoff remains available." : "AI takeoff complete.");
+    } catch (error) {
+      statefulUi.aiProcessingState = { status: "failed", progress: 0, error: error instanceof Error ? error.message : String(error) };
+      pushToast("AI takeoff failed.");
+      render();
+    }
+  }
+
+  async function exportAiTakeoffCsv() {
+    const project = getActiveProject();
+    if (!project) return;
+    const run = latestAiTakeoffRun(project.id);
+    if (!run) {
+      pushToast("Run AI Takeoff before exporting AI quantities.");
+      render();
+      return;
+    }
+    downloadText(`${slugify(project.name)}-ai-painting-takeoff.csv`, aiTakeoffCsv(run), "text/csv");
+    state.exports.unshift({
+      id: createId("export"),
+      projectId: project.id,
+      fileName: `${slugify(project.name)}-ai-painting-takeoff.csv`,
+      format: "csv",
+      createdAt: nowIso(),
+    });
+    await saveAndRender("AI takeoff CSV exported.");
+  }
+
+  function aiTakeoffCsv(run) {
+    const rows = [
+      ["record_type", "room", "page_id", "floor_area_sf", "perimeter_ft", "wall_sf", "ceiling_sf", "doors", "windows", "trim_lf", "confidence", "assumptions"],
+    ];
+    for (const room of aiTakeoffRooms(run)) {
+      rows.push([
+        "room",
+        room.name,
+        room.pageId || "",
+        room.floorAreaSf || "",
+        room.perimeterFt || "",
+        room.wallSf || "",
+        room.ceilingSf || "",
+        room.doorCount || 0,
+        room.windowCount || 0,
+        room.trimLf || "",
+        room.confidence || "",
+        (room.assumptions || []).join("; "),
+      ]);
+    }
+    const totals = run.totals || calculateAiTakeoffTotals(run);
+    rows.push(["summary", "TOTAL", "", totals.floorAreaSf, "", totals.wallSf, totals.ceilingSf, totals.doorCount, totals.windowCount, totals.trimLf, run.confidenceScore || "", (run.warnings || []).join("; ")]);
+    return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+  }
+
+  function csvCell(value) {
+    const text = String(value == null ? "" : value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
   async function submitScaleCalibration(data) {
     const project = getActiveProject();
     if (!project) return;
@@ -1728,6 +1866,7 @@
       calibratedBy: cleanText(data.calibratedBy) || state.settings.userName || "Estimator",
       calibratedAt: nowIso(),
       twoPointDistance: cleanText(data.twoPointDistance),
+      pixelsPerFoot: optionalNumber(data.pixelsPerFoot),
       multiScaleZones: cleanText(data.multiScaleZones).split(/\n+/).filter(Boolean),
       updatedAt: nowIso(),
     });
@@ -2471,7 +2610,7 @@
       revokePreviewUrl(drawingId);
     }
     state.projects = state.projects.filter((item) => item.id !== id);
-    for (const key of ["drawings", "rooms", "floors", "buildings", "scopes", "scopeDetections", "drawingMeasurements", "drawingIssues", "drawingScaleCalibrations", "drawingRevisionReviews", "takeoffMeasurements", "estimateLineItems", "rfis", "riskItems", "exports", "activities"]) {
+    for (const key of ["drawings", "rooms", "floors", "buildings", "scopes", "scopeDetections", "drawingMeasurements", "drawingIssues", "drawingScaleCalibrations", "drawingRevisionReviews", "aiTakeoffRuns", "takeoffMeasurements", "estimateLineItems", "rfis", "riskItems", "exports", "activities"]) {
       state[key] = state[key].filter((item) => item.projectId !== id);
     }
     if (state.settings.activeProjectId === id) {
@@ -2501,6 +2640,7 @@
       defaultMarkupPercent: numberValue(data.defaultMarkupPercent),
       defaultTaxPercent: numberValue(data.defaultTaxPercent),
       lowConfidenceThreshold: numberValue(data.lowConfidenceThreshold),
+      aiTakeoffEnabled: data.aiTakeoffEnabled !== "false",
       userName: cleanText(data.userName),
       userEmail: cleanText(data.userEmail),
     });
@@ -2552,6 +2692,7 @@
       drawingIssues: new Map(),
       drawingScaleCalibrations: new Map(),
       drawingRevisionReviews: new Map(),
+      aiTakeoffRuns: new Map(),
       takeoffMeasurements: new Map(),
       estimateLineItems: new Map(),
       rfis: new Map(),
@@ -2671,6 +2812,10 @@
       buildingName: entityName(state.buildings, row.buildingId),
       scopeName: entityName(state.scopes, row.scopeId),
     }));
+  }
+
+  function latestAiTakeoffRun(projectId) {
+    return [...filterByProject(state.aiTakeoffRuns, projectId)].sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null;
   }
 
   function ensureLocationEntities(projectId, data) {

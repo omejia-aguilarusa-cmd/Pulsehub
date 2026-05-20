@@ -1,0 +1,72 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>TakeoffPro app icon</title>
+  <desc>Minimal dark blue and graphite icon with a geometric takeoff mark for construction estimating software.</desc>
+  <defs>
+    <linearGradient id="bg" x1="120" y1="90" x2="920" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1424"/>
+      <stop offset="0.52" stop-color="#101827"/>
+      <stop offset="1" stop-color="#1B2433"/>
+    </linearGradient>
+    <radialGradient id="blueGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(724 244) rotate(130) scale(560 560)">
+      <stop offset="0" stop-color="#2F80FF" stop-opacity="0.48"/>
+      <stop offset="0.48" stop-color="#2F80FF" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#2F80FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orangeGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(256 756) rotate(-20) scale(460 460)">
+      <stop offset="0" stop-color="#FF6B35" stop-opacity="0.32"/>
+      <stop offset="0.56" stop-color="#FF6B35" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#FF6B35" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="298" y1="704" x2="746" y2="282" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D7E7FF"/>
+      <stop offset="0.47" stop-color="#62A8FF"/>
+      <stop offset="1" stop-color="#FF7A3D"/>
+    </linearGradient>
+    <linearGradient id="markSoft" x1="314" y1="695" x2="721" y2="307" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A8CFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FF7A3D" stop-opacity="0.25"/>
+    </linearGradient>
+    <filter id="glyphShadow" x="190" y="180" width="660" height="650" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="34" flood-color="#000814" flood-opacity="0.44"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="15" flood-color="#3A8DFF" flood-opacity="0.20"/>
+    </filter>
+    <clipPath id="safeClip">
+      <rect x="96" y="96" width="832" height="832" rx="188"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" fill="#0A0F1A"/>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#blueGlow)"/>
+  <rect width="1024" height="1024" fill="url(#orangeGlow)"/>
+
+  <g opacity="0.12" clip-path="url(#safeClip)">
+    <path d="M128 256H896M128 384H896M128 512H896M128 640H896M128 768H896" stroke="#D7E7FF" stroke-width="2"/>
+    <path d="M256 128V896M384 128V896M512 128V896M640 128V896M768 128V896" stroke="#D7E7FF" stroke-width="2"/>
+  </g>
+
+  <rect x="96" y="96" width="832" height="832" rx="188" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2"/>
+
+  <g filter="url(#glyphShadow)">
+    <!-- Soft under-stroke for optical weight at small sizes -->
+    <path d="M310 692C426 670 548 575 644 426" stroke="url(#markSoft)" stroke-width="114" stroke-linecap="round"/>
+    
+    <!-- Takeoff path / rising estimate line -->
+    <path d="M308 692C431 669 553 574 650 420" stroke="url(#mark)" stroke-width="70" stroke-linecap="round"/>
+
+    <!-- Arrow nose, kept inside mask safe zone -->
+    <path d="M650 420L744 292" stroke="url(#mark)" stroke-width="70" stroke-linecap="round"/>
+    <path d="M744 292L720 442" stroke="#FF7A3D" stroke-width="58" stroke-linecap="round"/>
+    <path d="M744 292L596 318" stroke="#FF7A3D" stroke-width="58" stroke-linecap="round"/>
+
+    <!-- Abstract T / takeoff measurement mark -->
+    <path d="M340 344H628" stroke="#F4F8FF" stroke-width="78" stroke-linecap="round"/>
+    <path d="M484 344V628" stroke="#F4F8FF" stroke-width="78" stroke-linecap="round"/>
+    <path d="M340 344H628" stroke="url(#mark)" stroke-opacity="0.42" stroke-width="78" stroke-linecap="round"/>
+    <path d="M484 344V628" stroke="url(#mark)" stroke-opacity="0.36" stroke-width="78" stroke-linecap="round"/>
+  </g>
+
+  <!-- Precision tick: subtle construction-plan cue -->
+  <path d="M328 746H490" stroke="#D7E7FF" stroke-opacity="0.28" stroke-width="24" stroke-linecap="round"/>
+  <path d="M328 794H432" stroke="#D7E7FF" stroke-opacity="0.18" stroke-width="18" stroke-linecap="round"/>
+</svg>

@@ -21,6 +21,13 @@ datas = [
     (str(_assets_src / "workspace_logic.js"), "takeoff_pro/ui/assets"),
     (str(_assets_src / "workspace_app.js"), "takeoff_pro/ui/assets"),
     (str(_assets_src / "drawing_workspace_services.js"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "favicon.ico"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "favicon-16x16.png"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "favicon-32x32.png"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "apple-touch-icon.png"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "manifest.json"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "manifest-icons-snippet.json"), "takeoff_pro/ui/assets"),
+    (str(_assets_src / "icons"), "takeoff_pro/ui/assets/icons"),
 ]
 binaries = []
 hiddenimports = [
@@ -152,4 +159,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_assets_src / "favicon.ico"),
 )

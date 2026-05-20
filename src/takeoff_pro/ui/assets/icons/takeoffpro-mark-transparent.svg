@@ -1,0 +1,18 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>TakeoffPro mark</title>
+  <defs>
+    <linearGradient id="mark" x1="298" y1="704" x2="746" y2="282" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D7E7FF"/>
+      <stop offset="0.47" stop-color="#62A8FF"/>
+      <stop offset="1" stop-color="#FF7A3D"/>
+    </linearGradient>
+  </defs>
+  <path d="M308 692C431 669 553 574 650 420" stroke="url(#mark)" stroke-width="70" stroke-linecap="round"/>
+  <path d="M650 420L744 292" stroke="url(#mark)" stroke-width="70" stroke-linecap="round"/>
+  <path d="M744 292L720 442" stroke="#FF7A3D" stroke-width="58" stroke-linecap="round"/>
+  <path d="M744 292L596 318" stroke="#FF7A3D" stroke-width="58" stroke-linecap="round"/>
+  <path d="M340 344H628" stroke="#F4F8FF" stroke-width="78" stroke-linecap="round"/>
+  <path d="M484 344V628" stroke="#F4F8FF" stroke-width="78" stroke-linecap="round"/>
+  <path d="M340 344H628" stroke="url(#mark)" stroke-opacity="0.42" stroke-width="78" stroke-linecap="round"/>
+  <path d="M484 344V628" stroke="url(#mark)" stroke-opacity="0.36" stroke-width="78" stroke-linecap="round"/>
+</svg>

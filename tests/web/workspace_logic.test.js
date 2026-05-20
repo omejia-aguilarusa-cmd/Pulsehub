@@ -70,6 +70,54 @@ test('estimate totals and CSV export are calculated from stored data', () => {
   assert.match(csv, /693/);
 });
 
+test('painting formulas deduct openings and calculate trim', () => {
+  const quantities = logic.calculatePaintingQuantities({
+    floorAreaSf: 500,
+    perimeterFt: 100,
+    ceilingHeightFt: 9,
+    doorCount: 2,
+    windowCount: 3,
+    includeDoors: true,
+    includeWindows: true,
+    includeTrim: true,
+  });
+
+  assert.equal(quantities.wallSf, 813);
+  assert.equal(quantities.ceilingSf, 500);
+  assert.equal(quantities.trimLf, 170);
+});
+
+test('CSV export includes AI painting takeoff rooms', () => {
+  const state = logic.createEmptyState();
+  const project = logic.createProject(state, { name: 'AI Export Test' });
+  state.aiTakeoffRuns.push({
+    id: 'run-1',
+    projectId: project.id,
+    status: 'complete',
+    confidenceScore: 82,
+    totals: { floorAreaSf: 100, wallSf: 320, ceilingSf: 100, doorCount: 1, windowCount: 2, trimLf: 141 },
+    pages: [{
+      pageId: 'drawing-1',
+      rooms: [{
+        id: 'room-1',
+        name: 'Office 101',
+        pageId: 'drawing-1',
+        wallSf: 320,
+        ceilingSf: 100,
+        doorCount: 1,
+        windowCount: 2,
+        trimLf: 141,
+        confidence: 82,
+      }],
+    }],
+  });
+
+  const csv = logic.buildProjectCsv(state, project.id);
+  assert.match(csv, /ai_takeoff_summary/);
+  assert.match(csv, /ai_takeoff_room/);
+  assert.match(csv, /Office 101/);
+});
+
 test('project search includes related takeoff names', () => {
   const state = logic.createEmptyState();
   const project = logic.createProject(state, { name: 'Search Test' });

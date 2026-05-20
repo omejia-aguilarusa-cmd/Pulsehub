@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -65,8 +66,11 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
 
     try:
         pages: list[Page] = []
+        uploaded_at = datetime.now(UTC).isoformat()
         # For TIFF files, read DPI metadata once for all pages in the file.
-        tiff_dpi = _tiff_dpi(source_path) if source_path.suffix.casefold() in {".tif", ".tiff"} else None
+        tiff_dpi = (
+            _tiff_dpi(source_path) if source_path.suffix.casefold() in {".tif", ".tiff"} else None
+        )
 
         for page_index in range(document.page_count):
             source_page = document.load_page(page_index)
@@ -93,6 +97,9 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
                     order_index=start_index + page_index,
                     image_path=source_path,
                     source_page_index=page_index,
+                    source_filename=source_path.name,
+                    source_page_count=document.page_count,
+                    uploaded_at=uploaded_at,
                     canvas_width=max(1, round(source_page.rect.width)),
                     canvas_height=max(1, round(source_page.rect.height)),
                     scale_pixels_per_unit=scale_pixels_per_unit,
@@ -109,7 +116,7 @@ def _pages_from_source(source_path: Path, *, start_index: int) -> list[Page]:
 def _tiff_dpi(path: Path) -> float | None:
     """Return the horizontal DPI from a TIFF file, or None if unavailable."""
     try:
-        from PIL import Image  # type: ignore[import-untyped]
+        from PIL import Image
 
         with Image.open(str(path)) as img:
             dpi_info = img.info.get("dpi")

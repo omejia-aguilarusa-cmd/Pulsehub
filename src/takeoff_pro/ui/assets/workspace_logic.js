@@ -27,6 +27,7 @@
     "drawingIssues",
     "drawingScaleCalibrations",
     "drawingRevisionReviews",
+    "aiTakeoffRuns",
     "takeoffMeasurements",
     "estimateLineItems",
     "rfis",
@@ -50,6 +51,7 @@
     userName: "",
     userEmail: "",
     reduceMotion: false,
+    aiTakeoffEnabled: true,
   });
 
   function nowIso() {
@@ -78,6 +80,7 @@
       drawingIssues: [],
       drawingScaleCalibrations: [],
       drawingRevisionReviews: [],
+      aiTakeoffRuns: [],
       takeoffMeasurements: [],
       materials: [],
       estimateLineItems: [],
@@ -107,6 +110,7 @@
       "drawingIssues",
       "drawingScaleCalibrations",
       "drawingRevisionReviews",
+      "aiTakeoffRuns",
       "takeoffMeasurements",
       "materials",
       "estimateLineItems",
@@ -253,6 +257,47 @@
     };
   }
 
+  function calculatePaintingQuantities(input) {
+    const floorAreaSf = optionalPositiveNumber(input.floorAreaSf);
+    const perimeterFt = optionalPositiveNumber(input.perimeterFt);
+    const ceilingHeightFt = optionalPositiveNumber(input.ceilingHeightFt) || 9;
+    const doorCount = input.includeDoors === false ? 0 : Math.max(0, Math.round(toNumber(input.doorCount, 0)));
+    const windowCount = input.includeWindows === false ? 0 : Math.max(0, Math.round(toNumber(input.windowCount, 0)));
+    const wallSf = perimeterFt == null
+      ? null
+      : Math.max(0, perimeterFt * ceilingHeightFt - doorCount * 21 - windowCount * 15);
+    const ceilingSf = floorAreaSf == null ? null : floorAreaSf;
+    const baseboardLf = perimeterFt == null ? null : perimeterFt;
+    const doorTrimLf = input.includeTrim === false ? 0 : doorCount * 17;
+    const windowTrimLf = input.includeTrim === false ? 0 : windowCount * 12;
+    const trimLf = input.includeTrim === false || baseboardLf == null ? null : baseboardLf + doorTrimLf + windowTrimLf;
+    return {
+      wallSf,
+      ceilingSf,
+      baseboardLf,
+      doorTrimLf,
+      windowTrimLf,
+      trimLf,
+    };
+  }
+
+  function calculateAiTakeoffTotals(run) {
+    const rooms = aiTakeoffRooms(run);
+    return rooms.reduce((totals, room) => {
+      totals.floorAreaSf += toNumber(room.floorAreaSf, 0);
+      totals.wallSf += toNumber(room.wallSf, 0);
+      totals.ceilingSf += toNumber(room.ceilingSf, 0);
+      totals.doorCount += toNumber(room.doorCount, 0);
+      totals.windowCount += toNumber(room.windowCount, 0);
+      totals.trimLf += toNumber(room.trimLf, 0);
+      return totals;
+    }, { floorAreaSf: 0, wallSf: 0, ceilingSf: 0, doorCount: 0, windowCount: 0, trimLf: 0 });
+  }
+
+  function aiTakeoffRooms(run) {
+    return (run?.pages || []).flatMap((page) => (page.rooms || []).map((room) => ({ ...room, pageId: room.pageId || page.pageId })));
+  }
+
   function filterByProject(rows, projectId) {
     return (Array.isArray(rows) ? rows : []).filter((row) => row.projectId === projectId);
   }
@@ -327,6 +372,7 @@
       drawingIssues: filterByProject(state.drawingIssues, projectId),
       drawingScaleCalibrations: filterByProject(state.drawingScaleCalibrations, projectId),
       drawingRevisionReviews: filterByProject(state.drawingRevisionReviews, projectId),
+      aiTakeoffRuns: filterByProject(state.aiTakeoffRuns, projectId),
       takeoffMeasurements: filterByProject(state.takeoffMeasurements, projectId),
       estimateLineItems: filterByProject(state.estimateLineItems, projectId),
       rfis: filterByProject(state.rfis, projectId),
@@ -371,6 +417,31 @@
         row.confidence,
         "",
       ]);
+    }
+    for (const run of bundle.aiTakeoffRuns) {
+      const totals = run.totals || calculateAiTakeoffTotals(run);
+      rows.push([
+        "ai_takeoff_summary",
+        run.id,
+        "Painting AI takeoff",
+        totals.wallSf,
+        "Wall SF",
+        run.status || "",
+        run.confidenceScore,
+        "",
+      ]);
+      for (const room of aiTakeoffRooms(run)) {
+        rows.push([
+          "ai_takeoff_room",
+          room.id,
+          room.name,
+          room.wallSf,
+          "Wall SF",
+          run.status || "",
+          room.confidence,
+          room.trimLf,
+        ]);
+      }
     }
     for (const row of bundle.estimateLineItems) {
       const calc = calculateEstimateLine(row);
@@ -537,6 +608,11 @@
     return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
   }
 
+  function optionalPositiveNumber(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+  }
+
   const api = {
     ROUTES,
     DEFAULT_SETTINGS,
@@ -546,6 +622,9 @@
     addActivity,
     cleanText,
     calculateEstimateLine,
+    calculatePaintingQuantities,
+    calculateAiTakeoffTotals,
+    aiTakeoffRooms,
     applyTakeoffFilters,
     calculateTakeoffSummary,
     filterByProject,

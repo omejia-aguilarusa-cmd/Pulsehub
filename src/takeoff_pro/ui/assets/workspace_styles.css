@@ -82,13 +82,19 @@ textarea:focus-visible {
 .brand-mark {
   width: 30px;
   height: 30px;
-  border-radius: 10px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
   background: #101114;
   color: #fff;
   font-size: 14px;
   font-weight: 700;
+}
+
+.brand-mark img {
+  display: block;
+  width: 22px;
+  height: 22px;
 }
 
 .brand-copy strong,
@@ -240,6 +246,42 @@ textarea:focus-visible {
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+
+.ai-run-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--blue-soft);
+  color: #0f172a;
+  padding: 10px 18px;
+}
+
+.ai-run-strip strong {
+  font-size: 13px;
+  min-width: 132px;
+}
+
+.ai-progress.compact {
+  flex: 1;
+  max-width: 420px;
+  height: 8px;
+  margin: 0;
+}
+
+.quantities-panel .notice.warn {
+  border-color: rgba(180, 83, 9, 0.25);
+  background: var(--amber-soft);
+  color: #7c2d12;
+}
+
+.quantities-panel .notice.warn p {
+  margin: 0 0 6px;
+}
+
+.quantities-panel .notice.warn p:last-child {
+  margin-bottom: 0;
 }
 
 .drawing-focus-mode .topbar {

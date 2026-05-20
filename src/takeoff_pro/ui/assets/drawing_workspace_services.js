@@ -215,6 +215,49 @@
     }));
   }
 
+  async function runPaintingTakeoff(options) {
+    await sleep(250);
+    if (typeof options.onProgress === "function") options.onProgress("Processing PDF", 20);
+    await sleep(250);
+    if (typeof options.onProgress === "function") options.onProgress("Calibrating Scale", 35);
+    await sleep(250);
+    if (typeof options.onProgress === "function") options.onProgress("Detecting Rooms", 55);
+    await sleep(250);
+    if (typeof options.onProgress === "function") options.onProgress("Measuring", 72);
+    await sleep(250);
+    if (typeof options.onProgress === "function") options.onProgress("Building Quantities", 90);
+    const timestamp = nowIso();
+    const sheetIds = Array.isArray(options.pageIds) && options.pageIds.length ? options.pageIds : [];
+    return {
+      id: createId("ai-takeoff-run"),
+      projectId: options.projectId,
+      status: "not_configured",
+      scope: "painting",
+      provider: "none",
+      model: "",
+      promptVersion: "painting-takeoff-v1",
+      pageIds: sheetIds,
+      pages: sheetIds.map((pageId) => ({
+        pageId,
+        rooms: [],
+        elements: [],
+        measurements: [],
+        warnings: ["AI provider is not configured. Set AI_PROVIDER and a provider API key for vision extraction."],
+      })),
+      totals: { floorAreaSf: 0, wallSf: 0, ceilingSf: 0, doorCount: 0, windowCount: 0, trimLf: 0 },
+      confidenceScore: 0,
+      warnings: ["AI provider is not configured. The workspace remains usable for manual takeoff and export."],
+      options: {
+        ceilingHeightFt: Number(options.ceilingHeightFt || 9),
+        includeDoors: options.includeDoors !== false,
+        includeWindows: options.includeWindows !== false,
+        includeTrim: options.includeTrim !== false,
+      },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+
   function mockMeasurementsForSheet({ projectId, sheetId, focus, createdAt, sheetIndex }) {
     const baseX = 10 + (sheetIndex % 3) * 4;
     const candidates = [
@@ -382,6 +425,7 @@
       calibratedAt: timestamp,
       multiScaleZones: [],
       twoPointDistance: "",
+      pixelsPerFoot: "",
     };
   }
 
@@ -480,6 +524,7 @@
     },
     measurementService: {
       runAiMeasurement,
+      runPaintingTakeoff,
       createManualMeasurement,
       pushToTakeoff,
       measurementLayerKey,

@@ -59,6 +59,22 @@ The packaged app is written to `dist\TakeoffPro.exe`.
 - Review uploaded drawings locally for common PDF scale notes, vector linework, and rectangular regions.
 - Create confidence-tagged automated measurements after upload when linework is detected.
 - Keep unscaled drawings in page units until a reliable scale is available, instead of claiming field units prematurely.
+- Rasterize drawing pages for AI vision workflows and run an API-shaped painting takeoff service.
+- Keep AI takeoff usable without external keys by returning a clear "AI not configured" result.
+
+## AI Takeoff Configuration
+
+Phase 1 AI takeoff is painting-focused and gated by configuration. The app remains functional without these variables.
+
+```powershell
+$env:AI_PROVIDER="openai"          # openai or anthropic
+$env:AI_TAKEOFF_MODEL="gpt-4.1-mini"
+$env:AI_CHAT_MODEL="gpt-4.1-mini"
+$env:OPENAI_API_KEY="..."
+$env:ANTHROPIC_API_KEY="..."
+```
+
+Provider calls happen in the Python service layer only. Do not place API keys in frontend files or project exports.
 
 ## Development
 
