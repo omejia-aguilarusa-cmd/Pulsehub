@@ -38,6 +38,7 @@ dev = [
 
 [project.scripts]
 takeoff-pro = "takeoff_pro.app:main"
+ai-health = "takeoff_pro.ai.health_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/takeoff_pro"]
