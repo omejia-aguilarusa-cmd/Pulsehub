@@ -747,15 +747,17 @@
           <span class="tag">${reviewStats.pushed} pushed</span>
         </div>
         <div class="inline-actions">
-          ${isPdf(active) ? `<button class="button ghost" data-action="viewer-prev-page" data-id="${active.id}" aria-label="Previous PDF page">Previous</button><input class="button page-input" type="number" min="1" value="${page}" data-role="viewer-page" data-id="${active.id}" aria-label="PDF page number"><button class="button ghost" data-action="viewer-next-page" data-id="${active.id}" aria-label="Next PDF page">Next</button>` : ""}
+          ${isPdf(active) ? `<button class="button ghost" data-action="viewer-prev-page" data-id="${active.id}" ${page <= 1 ? "disabled" : ""} aria-label="Previous PDF page">‹ Prev</button><span class="tag" style="min-width:60px;text-align:center">p. ${page}${active.pageCount ? ` / ${active.pageCount}` : ""}</span><button class="button ghost" data-action="viewer-next-page" data-id="${active.id}" ${active.pageCount && page >= active.pageCount ? "disabled" : ""} aria-label="Next PDF page">Next ›</button>` : ""}
           <button class="button ghost" data-action="toggle-right-inspector" aria-label="${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}" aria-expanded="${statefulUi.rightInspectorCollapsed ? "false" : "true"}">${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}</button>
         </div>
       </div>
       <div class="drawing-stage ${statefulUi.confidenceHeatmap ? "heatmap-enabled" : ""}">
-        <div class="drawing-document-layer">
-          ${renderDrawingPreview(active, page)}
+        <div class="drawing-content-wrap" style="transform:scale(${statefulUi.pdfZoom || 1});transform-origin:top left;">
+          <div class="drawing-document-layer">
+            ${renderDrawingPreview(active, page)}
+          </div>
+          ${renderCanvasOverlays(project, active, measurements, issues, rfis, revision)}
         </div>
-        ${renderCanvasOverlays(project, active, measurements, issues, rfis, revision)}
       </div>
       ${statefulUi.drawingMode === "compare" ? renderRevisionDeltaPanel(revision) : ""}
       ${statefulUi.calibrationMode ? `<div class="measurement-tool-callout"><strong>Two-point calibration.</strong><span>${statefulUi.calibrationPoints.length === 0 ? "Click the first calibration point on the drawing." : "Click the second calibration point to complete the line."}</span><button class="button ghost" data-action="cancel-calibration-mode">Cancel</button></div>` : ""}
@@ -787,9 +789,7 @@
       const rendered = statefulUi.pdfPageUrls.get(key);
       const isRendering = statefulUi.pdfPageRendering.has(key);
       if (rendered) {
-        const zoom = statefulUi.pdfZoom || 1;
-        const transform = zoom !== 1 ? `style="transform:scale(${zoom});transform-origin:top left;"` : "";
-        return `<div class="drawing-preview-frame" style="overflow:hidden"><img class="pdf-page-img" alt="${escapeAttribute(active.name)} p${page}" src="${escapeAttribute(rendered)}" draggable="false" ${transform}></div>`;
+        return `<div class="drawing-preview-frame"><img class="pdf-page-img" alt="${escapeAttribute(active.name)} p${page}" src="${escapeAttribute(rendered)}" draggable="false"></div>`;
       }
       if (!isRendering) ensurePageRender(active.id, page || 1);
       return renderMockPlan(active, isRendering ? "Rendering page…" : "Loading page…");
@@ -1208,8 +1208,12 @@
   }
 
   function renderEstimate(project) {
-    const rows = filterByProject(state.estimateLineItems, project.id);
-    const totals = rows.reduce((acc, row) => {
+    const allRows = filterByProject(state.estimateLineItems, project.id);
+    const baseRows = allRows.filter((r) => !r.lineType || r.lineType === "base");
+    const altRows = allRows.filter((r) => r.lineType === "alternate");
+    const exRows = allRows.filter((r) => r.lineType === "exclusion");
+    const clarRows = allRows.filter((r) => r.lineType === "clarification");
+    const totals = baseRows.reduce((acc, row) => {
       const calc = calculateEstimateLine(row);
       acc.direct += calc.directCost;
       acc.markup += calc.markupAmount;
@@ -1217,21 +1221,54 @@
       acc.total += calc.total;
       return acc;
     }, { direct: 0, markup: 0, tax: 0, total: 0 });
+    const issues = estimateValidationIssues(baseRows, project);
+    const TRADES = ["paint", "drywall", "general"];
     return `
       <div class="page">
-        ${renderPageHeader("Estimate", "Generate estimate lines from takeoff or add manual items with live cost calculations.", `<div class="inline-actions"><button class="button" data-action="generate-estimate">Generate from takeoff</button><button class="button primary" data-action="open-estimate-modal">Manual line item</button></div>`)}
+        ${renderPageHeader("Estimate", "BOQ grouped by trade. Alternates, exclusions, and clarifications are separate.", `<div class="inline-actions"><button class="button" data-action="generate-estimate">Generate from takeoff</button><button class="button primary" data-action="open-estimate-modal">Add line item</button></div>`)}
         <div class="card-grid">
-          ${metricCard("Direct cost", formatCurrency(totals.direct), "Quantity × unit, labor, and material cost")}
-          ${metricCard("Markup", formatCurrency(totals.markup), `${state.settings.defaultMarkupPercent}% default markup`)}
+          ${metricCard("Direct cost", formatCurrency(totals.direct), `${baseRows.length} base lines`)}
+          ${metricCard("Markup", formatCurrency(totals.markup), `${state.settings.defaultMarkupPercent}% default`)}
           ${metricCard("Tax", formatCurrency(totals.tax), `${state.settings.defaultTaxPercent}% default tax`)}
-          ${metricCard("Estimate total", formatCurrency(totals.total), `${rows.length} line item${rows.length === 1 ? "" : "s"}`)}
+          ${metricCard("Estimate total", formatCurrency(totals.total), `${altRows.length} alternate${altRows.length === 1 ? "" : "s"}, ${exRows.length} exclusion${exRows.length === 1 ? "" : "s"}`)}
         </div>
-        <section class="panel">
-          <div class="panel-header"><div><h2>Estimate lines</h2><p>${rows.length ? "Totals recalculate from stored line items." : "No estimate lines yet"}</p></div></div>
-          ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Unit cost</th><th>Labor</th><th>Material</th><th>Markup</th><th>Tax</th><th>Total</th><th>Actions</th></tr></thead><tbody>${rows.map((row) => { const calc = calculateEstimateLine(row); return `<tr><td>${escapeHtml(row.description)}</td><td>${formatNumber(row.quantity)}</td><td>${escapeHtml(row.unit)}</td><td>${formatCurrency(row.unitCost)}</td><td>${formatCurrency(row.laborCost)}</td><td>${formatCurrency(row.materialCost)}</td><td>${formatNumber(row.markupPercent)}%</td><td>${formatNumber(row.taxPercent)}%</td><td>${formatCurrency(calc.total)}</td><td><div class="inline-actions"><button class="button ghost" data-action="edit-estimate" data-id="${row.id}">Edit</button><button class="button ghost" data-action="delete-estimate" data-id="${row.id}">Delete</button></div></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="panel-body">${renderInlineEmpty("No estimate lines yet.", "Generate rows from approved takeoff or add a manual line item.", `<div class="inline-actions"><button class="button" data-action="generate-estimate">Generate from takeoff</button><button class="button primary" data-action="open-estimate-modal">Manual line item</button></div>`)}</div>`}
-        </section>
+        ${issues.length ? `<div class="notice" style="background:var(--amber-soft);color:#7c2d12">${issues.map((i) => `<p style="margin:2px 0">⚠ ${escapeHtml(i)}</p>`).join("")}</div>` : ""}
+        ${TRADES.map((trade) => {
+          const tradeRows = baseRows.filter((r) => (r.trade || "general") === trade);
+          if (!tradeRows.length) return "";
+          const tradeTotals = tradeRows.reduce((acc, row) => { const c = calculateEstimateLine(row); acc += c.total; return acc; }, 0);
+          return `<section class="panel">
+            <div class="panel-header"><div><h2>${titleCase(trade)}</h2><p>${tradeRows.length} line${tradeRows.length === 1 ? "" : "s"} — ${formatCurrency(tradeTotals)}</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Labor</th><th>Material</th><th>Markup</th><th>Total</th><th></th></tr></thead>
+            <tbody>${tradeRows.map((row) => {
+              const calc = calculateEstimateLine(row);
+              const warn = (!row.quantity || row.quantity <= 0) || (calc.directCost <= 0);
+              return `<tr${warn ? ' class="row-warn"' : ""}><td>${escapeHtml(row.description)}${row.notes ? `<br><small style="color:var(--muted)">${escapeHtml(row.notes)}</small>` : ""}</td><td>${formatNumber(row.quantity)}</td><td>${escapeHtml(row.unit || "")}</td><td>${formatCurrency(row.laborCost)}</td><td>${formatCurrency(row.materialCost)}</td><td>${formatNumber(row.markupPercent || 0)}%</td><td><strong>${formatCurrency(calc.total)}</strong></td><td><div class="inline-actions"><button class="button ghost" data-action="edit-estimate" data-id="${row.id}">Edit</button><button class="button ghost" data-action="delete-estimate" data-id="${row.id}">✕</button></div></td></tr>`;
+            }).join("")}</tbody></table></div>
+          </section>`;
+        }).join("")}
+        ${!baseRows.length ? `<section class="panel"><div class="panel-body">${renderInlineEmpty("No base scope lines.", "Generate from takeoff or add a manual line item.", `<div class="inline-actions"><button class="button" data-action="generate-estimate">Generate from takeoff</button><button class="button primary" data-action="open-estimate-modal">Add line item</button></div>`)}</div></section>` : ""}
+        ${altRows.length ? `<section class="panel"><div class="panel-header"><div><h2>Alternates</h2><p>${altRows.length} item${altRows.length === 1 ? "" : "s"}</p></div></div><div class="table-wrap"><table><thead><tr><th>Description</th><th>Total</th><th></th></tr></thead><tbody>${altRows.map((row) => `<tr><td>${escapeHtml(row.description)}</td><td>${formatCurrency(calculateEstimateLine(row).total)}</td><td><button class="button ghost" data-action="edit-estimate" data-id="${row.id}">Edit</button></td></tr>`).join("")}</tbody></table></div></section>` : ""}
+        ${exRows.length ? `<section class="panel"><div class="panel-header"><div><h2>Exclusions</h2><p>${exRows.length} item${exRows.length === 1 ? "" : "s"}</p></div></div><div class="panel-body"><div class="list">${exRows.map((row) => `<div class="list-item"><span>${escapeHtml(row.description)}</span><button class="button ghost" data-action="edit-estimate" data-id="${row.id}">Edit</button></div>`).join("")}</div></div></section>` : ""}
+        ${clarRows.length ? `<section class="panel"><div class="panel-header"><div><h2>Clarifications</h2><p>${clarRows.length} item${clarRows.length === 1 ? "" : "s"}</p></div></div><div class="panel-body"><div class="list">${clarRows.map((row) => `<div class="list-item"><span>${escapeHtml(row.description)}${row.notes ? ` — ${escapeHtml(row.notes)}` : ""}</span><button class="button ghost" data-action="edit-estimate" data-id="${row.id}">Edit</button></div>`).join("")}</div></div></section>` : ""}
       </div>
     `;
+  }
+
+  function estimateValidationIssues(rows, project) {
+    const issues = [];
+    const zeroQty = rows.filter((r) => !r.quantity || r.quantity <= 0);
+    if (zeroQty.length) issues.push(`${zeroQty.length} line${zeroQty.length === 1 ? "" : "s"} with zero quantity.`);
+    const zeroPrice = rows.filter((r) => {
+      const calc = calculateEstimateLine(r);
+      return r.lineType !== "exclusion" && calc.directCost <= 0;
+    });
+    if (zeroPrice.length) issues.push(`${zeroPrice.length} line${zeroPrice.length === 1 ? "" : "s"} with no labor or material cost.`);
+    const sheets = filterByProject(state.drawings, project.id);
+    const calibrations = filterByProject(state.drawingScaleCalibrations, project.id);
+    const uncalibrated = sheets.filter((s) => !calibrations.find((c) => c.sheetId === s.id));
+    if (uncalibrated.length) issues.push(`${uncalibrated.length} sheet${uncalibrated.length === 1 ? "" : "s"} without scale calibration.`);
+    return issues;
   }
 
   function renderRiskConfidence(project) {
@@ -1682,15 +1719,35 @@
   function renderEstimateForm(item) {
     const current = item || {};
     return `<div class="form-grid">
+      ${selectField("Trade", "trade", current.trade || "paint", [
+        { value: "paint", label: "Paint" },
+        { value: "drywall", label: "Drywall" },
+        { value: "general", label: "General" },
+      ])}
+      ${selectField("Line type", "lineType", current.lineType || "base", [
+        { value: "base", label: "Base scope" },
+        { value: "alternate", label: "Alternate" },
+        { value: "exclusion", label: "Exclusion" },
+        { value: "clarification", label: "Clarification" },
+        { value: "allowance", label: "Allowance" },
+      ])}
       ${field("Description", "description", current.description || "", "text", true)}
       ${field("Quantity", "quantity", current.quantity || "", "number", true)}
-      ${field("Unit", "unit", current.unit || "EA", "text", true)}
-      ${field("Unit cost", "unitCost", current.unitCost || 0, "number", true)}
-      ${field("Labor", "laborCost", current.laborCost || 0, "number", true)}
-      ${field("Material", "materialCost", current.materialCost || 0, "number", true)}
-      ${field("Markup %", "markupPercent", current.markupPercent == null ? state.settings.defaultMarkupPercent : current.markupPercent, "number", true)}
-      ${field("Tax %", "taxPercent", current.taxPercent == null ? state.settings.defaultTaxPercent : current.taxPercent, "number", true)}
-      ${field("Confidence %", "confidence", current.confidence == null ? 100 : current.confidence, "number", true)}
+      ${selectField("Unit", "unit", current.unit || "SF", [
+        { value: "SF", label: "SF — square feet" },
+        { value: "LF", label: "LF — linear feet" },
+        { value: "EA", label: "EA — each" },
+        { value: "SY", label: "SY — square yards" },
+        { value: "GAL", label: "GAL — gallons" },
+        { value: "HR", label: "HR — hours" },
+        { value: "SHEET", label: "SHEET" },
+      ])}
+      ${field("Unit cost ($)", "unitCost", current.unitCost || 0, "number")}
+      ${field("Labor ($)", "laborCost", current.laborCost || 0, "number")}
+      ${field("Material ($)", "materialCost", current.materialCost || 0, "number")}
+      ${field("Markup %", "markupPercent", current.markupPercent == null ? state.settings.defaultMarkupPercent : current.markupPercent, "number")}
+      ${field("Tax %", "taxPercent", current.taxPercent == null ? state.settings.defaultTaxPercent : current.taxPercent, "number")}
+      ${field("Notes / clarification text", "notes", current.notes || "", "text", false, true)}
     </div>`;
   }
 
@@ -1741,10 +1798,14 @@
     const stageEl = event.target.closest(".drawing-stage");
     if (!stageEl) return;
     if (event.target.closest("[data-action]")) return;
-    if (statefulUi.drawingInProgress && ["area", "polygon"].includes(statefulUi.drawingInProgress.tool)) {
+    if (statefulUi.drawingInProgress) {
+      const { tool, points, sheetId } = statefulUi.drawingInProgress;
       const project = getActiveProject();
-      if (project && statefulUi.drawingInProgress.points.length >= 3) {
-        finalizeMeasurement(project, statefulUi.drawingInProgress.sheetId, statefulUi.drawingInProgress.tool);
+      if (!project) return;
+      if (["area", "polygon"].includes(tool) && points.length >= 3) {
+        finalizeMeasurement(project, sheetId, tool);
+      } else if (tool === "polyline" && points.length >= 2) {
+        finalizeMeasurement(project, sheetId, "polyline");
       }
     }
   }
@@ -1755,8 +1816,9 @@
     const stageEl = event.target.closest(".drawing-stage");
     if (stageEl && !event.target.closest("[data-action]")) {
       const rect = stageEl.getBoundingClientRect();
-      const x = clampCoord(((event.clientX - rect.left) / rect.width) * 100);
-      const y = clampCoord(((event.clientY - rect.top) / rect.height) * 100);
+      const zoom = statefulUi.pdfZoom || 1;
+      const x = clampCoord(((event.clientX - rect.left) / zoom / rect.width) * 100);
+      const y = clampCoord(((event.clientY - rect.top) / zoom / rect.height) * 100);
       await handleDrawingCanvasClick(x, y);
       return;
     }
@@ -2198,8 +2260,13 @@
   }
 
   function changeViewerPage(id, delta) {
+    const drawing = findById(state.drawings, id);
     const current = statefulUi.viewerPageByDrawingId[id] || 1;
-    statefulUi.viewerPageByDrawingId[id] = Math.max(1, current + delta);
+    const max = drawing && drawing.pageCount ? drawing.pageCount : 9999;
+    const next = Math.max(1, Math.min(max, current + delta));
+    if (next === current) return;
+    statefulUi.viewerPageByDrawingId[id] = next;
+    hydratePreviewIfNeeded();
     render();
   }
 
@@ -3327,15 +3394,17 @@
       createdAt: nowIso(),
     };
     Object.assign(row, {
+      trade: data.trade || "general",
+      lineType: data.lineType || "base",
       description: cleanText(data.description),
       quantity: numberValue(data.quantity),
-      unit: cleanText(data.unit),
+      unit: cleanText(data.unit) || "EA",
       unitCost: numberValue(data.unitCost),
       laborCost: numberValue(data.laborCost),
       materialCost: numberValue(data.materialCost),
       markupPercent: numberValue(data.markupPercent),
       taxPercent: numberValue(data.taxPercent),
-      confidence: clampConfidence(data.confidence),
+      notes: cleanText(data.notes),
       updatedAt: nowIso(),
     });
     if (!existing) state.estimateLineItems.push(row);
