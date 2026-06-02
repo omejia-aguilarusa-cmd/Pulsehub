@@ -79,6 +79,12 @@
     activeInspectorTab: "selection",
     aiProcessingState: null,
     aiTakeoffStage: "",
+    pdfZoom: 1.0,
+    pdfPageUrls: new Map(),
+    pdfPageRendering: new Set(),
+    drawingInProgress: null,
+    calibrationMode: false,
+    calibrationPoints: [],
     sheetFilters: {
       discipline: "all",
       query: "",
@@ -216,6 +222,7 @@
   });
 
   document.addEventListener("click", handleClick);
+  document.addEventListener("dblclick", handleDrawingDblClick);
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("change", handleChange);
   document.addEventListener("input", handleInput);
@@ -751,7 +758,8 @@
         ${renderCanvasOverlays(project, active, measurements, issues, rfis, revision)}
       </div>
       ${statefulUi.drawingMode === "compare" ? renderRevisionDeltaPanel(revision) : ""}
-      ${statefulUi.selectedMeasurementTool ? `<div class="measurement-tool-callout"><strong>${escapeHtml(titleCase(statefulUi.selectedMeasurementTool))} tool active.</strong><span>Canvas interaction is mocked; use Add sample to create a placeholder measurement.</span></div>` : ""}
+      ${statefulUi.calibrationMode ? `<div class="measurement-tool-callout"><strong>Two-point calibration.</strong><span>${statefulUi.calibrationPoints.length === 0 ? "Click the first calibration point on the drawing." : "Click the second calibration point to complete the line."}</span><button class="button ghost" data-action="cancel-calibration-mode">Cancel</button></div>` : ""}
+      ${!statefulUi.calibrationMode && statefulUi.selectedMeasurementTool ? `<div class="measurement-tool-callout"><strong>${escapeHtml(titleCase(statefulUi.selectedMeasurementTool))} tool active.</strong><span>${statefulUi.drawingInProgress ? `${statefulUi.drawingInProgress.points.length} point${statefulUi.drawingInProgress.points.length === 1 ? "" : "s"} placed — ${["area","polygon"].includes(statefulUi.selectedMeasurementTool) ? "double-click to close" : "click to complete"}.` : "Click on the drawing to start measuring."}</span><button class="button ghost" data-action="cancel-drawing-tool">Cancel</button></div>` : ""}
     `;
   }
 
@@ -769,12 +777,23 @@
 
   function renderDrawingPreview(active, page) {
     if (!active) return "";
-    const url = statefulUi.previewUrls.get(active.id);
     if (statefulUi.missingFileIds.has(active.id)) {
       return `<div class="empty-state"><h3>Original file unavailable</h3><p>The document record exists, but the original local file is not stored in this workspace. Re-upload the document to preview it again.</p><button class="button" data-route="documents">Go to Documents</button></div>`;
     }
-    if (!url) return renderMockPlan(active, "Loading drawing preview...");
-    if (isPdf(active)) return `<div class="viewer-frame drawing-preview-frame"><iframe title="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}#page=${page}"></iframe></div>`;
+    const url = statefulUi.previewUrls.get(active.id);
+    if (!url) return renderMockPlan(active, "Loading drawing…");
+    if (isPdf(active)) {
+      const key = `${active.id}-p${page || 1}`;
+      const rendered = statefulUi.pdfPageUrls.get(key);
+      const isRendering = statefulUi.pdfPageRendering.has(key);
+      if (rendered) {
+        const zoom = statefulUi.pdfZoom || 1;
+        const transform = zoom !== 1 ? `style="transform:scale(${zoom});transform-origin:top left;"` : "";
+        return `<div class="drawing-preview-frame" style="overflow:hidden"><img class="pdf-page-img" alt="${escapeAttribute(active.name)} p${page}" src="${escapeAttribute(rendered)}" draggable="false" ${transform}></div>`;
+      }
+      if (!isRendering) ensurePageRender(active.id, page || 1);
+      return renderMockPlan(active, isRendering ? "Rendering page…" : "Loading page…");
+    }
     if (isImage(active)) return `<div class="viewer-frame drawing-preview-frame"><img alt="${escapeAttribute(active.name)} preview" src="${escapeAttribute(url)}"></div>`;
     return renderMockPlan(active, "Preview not available for this file type.");
   }
@@ -799,10 +818,15 @@
     const visibleIssues = issues.filter((item) => issueVisible(item));
     const visibleRfis = rfis.filter((item) => rfiVisible(item));
     const revisionAreas = statefulUi.drawingMode === "compare" && statefulUi.compare.highlightChanges && statefulUi.visibleLayers["revision-changes"] ? revision.changedAreas : [];
+    const inProgress = statefulUi.drawingInProgress;
+    const calPts = statefulUi.calibrationPoints;
     return `
       <svg class="drawing-svg-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Drawing overlays">
         ${visibleMeasurements.map((item) => renderMeasurementOverlay(item)).join("")}
         ${revisionAreas.map((item) => renderRevisionOverlay(item)).join("")}
+        ${inProgress ? renderInProgressOverlay(inProgress) : ""}
+        ${calPts.map((pt, i) => `<circle cx="${num(pt.x)}" cy="${num(pt.y)}" r="1.2" fill="var(--blue)" stroke="#fff" stroke-width="0.4"><title>Calibration point ${i + 1}</title></circle>`).join("")}
+        ${calPts.length === 2 ? `<line x1="${num(calPts[0].x)}" y1="${num(calPts[0].y)}" x2="${num(calPts[1].x)}" y2="${num(calPts[1].y)}" stroke="var(--blue)" stroke-width="0.5" stroke-dasharray="2 1"/>` : ""}
       </svg>
       <div class="pin-overlay">
         ${visibleMeasurements.filter((item) => item.geometry?.kind === "point").map((item) => renderPointPin("measurement", item.id, item.geometry, item.label, item.confidence, item.status)).join("")}
@@ -810,6 +834,27 @@
         ${visibleRfis.map((item) => renderPointPin("rfi", item.id, item.locationGeometry || { kind: "point", x: 70, y: 40 }, item.title, null, item.status)).join("")}
       </div>
     `;
+  }
+
+  function renderInProgressOverlay(inProgress) {
+    const pts = inProgress.points;
+    if (!pts || !pts.length) return "";
+    const tool = inProgress.tool;
+    const dotColor = "var(--blue)";
+    const dots = pts.map((p) => `<circle cx="${num(p.x)}" cy="${num(p.y)}" r="1" fill="${dotColor}" stroke="#fff" stroke-width="0.4"/>`).join("");
+    if (pts.length < 2) return dots;
+    if (tool === "line" || tool === "polyline") {
+      return `${dots}<polyline points="${pts.map((p) => `${num(p.x)},${num(p.y)}`).join(" ")}" fill="none" stroke="var(--blue)" stroke-width="0.5" stroke-dasharray="2 1"/>`;
+    }
+    if (tool === "rectangle" && pts.length >= 2) {
+      const x = Math.min(pts[0].x, pts[1].x), y = Math.min(pts[0].y, pts[1].y);
+      const w = Math.abs(pts[1].x - pts[0].x), h = Math.abs(pts[1].y - pts[0].y);
+      return `${dots}<rect x="${num(x)}" y="${num(y)}" width="${num(w)}" height="${num(h)}" fill="rgba(59,130,246,0.12)" stroke="var(--blue)" stroke-width="0.5" stroke-dasharray="2 1"/>`;
+    }
+    if (tool === "area" || tool === "polygon") {
+      return `${dots}<polygon points="${pts.map((p) => `${num(p.x)},${num(p.y)}`).join(" ")}" fill="rgba(59,130,246,0.12)" stroke="var(--blue)" stroke-width="0.5" stroke-dasharray="2 1"/>`;
+    }
+    return dots;
   }
 
   function renderMeasurementOverlay(item) {
@@ -1484,30 +1529,38 @@
     const sheets = drawingServices.drawingService.getSheets(state, project.id);
     const activeId = payload.sheetId || state.settings.activeDrawingIdByProject[project.id] || sheets[0]?.id || "";
     const existing = state.drawingScaleCalibrations.find((item) => item.sheetId === activeId) || drawingServices.scaleService.defaultScaleCalibration(project.id, activeId);
+    const ptA = payload.twoPointA;
+    const ptB = payload.twoPointB;
+    const hasTwoPoints = ptA && ptB;
+    const ptDist = hasTwoPoints ? Math.sqrt(Math.pow(ptB.x - ptA.x, 2) + Math.pow(ptB.y - ptA.y, 2)).toFixed(2) : null;
     return `
       <div class="stack">
-        <div class="notice">Two-point calibration is a UI placeholder. Real canvas point capture can write into this same scale record later.</div>
+        ${hasTwoPoints
+          ? `<div class="notice ok">Two calibration points captured (${ptDist} canvas units). Enter the real-world distance below to compute scale.</div>
+             <input type="hidden" name="twoPointAx" value="${escapeAttribute(ptA.x)}">
+             <input type="hidden" name="twoPointAy" value="${escapeAttribute(ptA.y)}">
+             <input type="hidden" name="twoPointBx" value="${escapeAttribute(ptB.x)}">
+             <input type="hidden" name="twoPointBy" value="${escapeAttribute(ptB.y)}">`
+          : `<div class="notice">To use two-point calibration: close this modal, click <strong>Start two-point calibration</strong> in the toolbar, then click two known points on the drawing.</div>`}
         <div class="form-grid">
           ${selectField("Sheet", "sheetId", activeId, sheets.map((sheet) => ({ value: sheet.id, label: `${sheet.sheetNumber} - ${sheet.sheetTitle}` })))}
-          <label class="field"><span>Auto-detected scale</span><input value="${escapeAttribute(existing.scaleValue || drawingServices.SCALE_OPTIONS[1])}" disabled></label>
-          ${selectField("Manual scale", "scaleValue", existing.scaleValue || '1/8" = 1\'-0"', drawingServices.SCALE_OPTIONS.map((value) => ({ value, label: value })))}
-          ${selectField("Scale source", "scaleSource", existing.scaleSource || "manual", [
-            { value: "auto", label: "Auto" },
-            { value: "manual", label: "Manual" },
-            { value: "two_point", label: "Two point" },
+          ${selectField("Manual scale preset", "scaleValue", existing.scaleValue || '1/8" = 1\'-0"', drawingServices.SCALE_OPTIONS.map((value) => ({ value, label: value })))}
+          ${selectField("Scale source", "scaleSource", hasTwoPoints ? "two_point" : (existing.scaleSource || "manual"), [
+            { value: "manual", label: "Manual preset" },
+            { value: "two_point", label: "Two-point calibration" },
+            { value: "auto", label: "Auto-detected" },
             { value: "missing", label: "Missing" },
           ])}
+          ${field("Real-world distance (feet)", "twoPointRealDistanceFt", existing.twoPointRealDistanceFt || "", "number")}
           ${selectField("Scale confidence", "scaleConfidence", existing.scaleConfidence || "Needs confirmation", [
-            { value: "Auto-detected", label: "Auto-detected" },
             { value: "Manually set", label: "Manually set" },
+            { value: "Auto-detected", label: "Auto-detected" },
             { value: "Needs confirmation", label: "Needs confirmation" },
             { value: "Missing", label: "Missing" },
           ])}
-          ${field("Two-point real distance", "twoPointDistance", existing.twoPointDistance || "", "text")}
-          ${field("Custom pixels per foot", "pixelsPerFoot", existing.pixelsPerFoot || "", "number")}
           <label class="field"><span>Lock approved scale</span><select name="scaleLocked"><option value="false" ${existing.scaleLocked ? "" : "selected"}>Unlocked</option><option value="true" ${existing.scaleLocked ? "selected" : ""}>Locked</option></select></label>
           ${field("Calibrated by", "calibratedBy", existing.calibratedBy || state.settings.userName || "Estimator")}
-          <label class="field full"><span>Multi-scale zones</span><textarea name="multiScaleZones" placeholder="Placeholder for future enlarged plan/detail zones">${escapeHtml((existing.multiScaleZones || []).join("\n"))}</textarea></label>
+          <label class="field full"><span>Multi-scale zones / notes</span><textarea name="multiScaleZones">${escapeHtml((existing.multiScaleZones || []).join("\n"))}</textarea></label>
         </div>
       </div>
     `;
@@ -1684,7 +1737,30 @@
     return `<label class="field"><span>${label}</span><select name="${name}">${allowBlank ? `<option value="">None</option>` : ""}${options.map((option) => `<option value="${escapeAttribute(option.value)}" ${String(value) === String(option.value) ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`;
   }
 
+  function handleDrawingDblClick(event) {
+    const stageEl = event.target.closest(".drawing-stage");
+    if (!stageEl) return;
+    if (event.target.closest("[data-action]")) return;
+    if (statefulUi.drawingInProgress && ["area", "polygon"].includes(statefulUi.drawingInProgress.tool)) {
+      const project = getActiveProject();
+      if (project && statefulUi.drawingInProgress.points.length >= 3) {
+        finalizeMeasurement(project, statefulUi.drawingInProgress.sheetId, statefulUi.drawingInProgress.tool);
+      }
+    }
+  }
+
   async function handleClick(event) {
+    // Drawing canvas interaction — fires when clicking inside the drawing stage
+    // without hitting a [data-action] element.
+    const stageEl = event.target.closest(".drawing-stage");
+    if (stageEl && !event.target.closest("[data-action]")) {
+      const rect = stageEl.getBoundingClientRect();
+      const x = clampCoord(((event.clientX - rect.left) / rect.width) * 100);
+      const y = clampCoord(((event.clientY - rect.top) / rect.height) * 100);
+      await handleDrawingCanvasClick(x, y);
+      return;
+    }
+
     const routeTarget = event.target.closest("[data-route]");
     if (routeTarget) {
       event.preventDefault();
@@ -1749,11 +1825,20 @@
       case "create-rfi-from-selected-issue": await createRfiFromSelectedIssue(); return;
       case "open-drawing-search-result": await openDrawingSearchResult(target); return;
       case "share-placeholder": pushToast("Share link placeholder. Connect to project permissions backend later."); render(); return;
-      case "viewer-zoom-out":
-      case "viewer-zoom-in":
+      case "viewer-zoom-in": statefulUi.pdfZoom = Math.min(4, +(statefulUi.pdfZoom * 1.3).toFixed(2)); render(); return;
+      case "viewer-zoom-out": statefulUi.pdfZoom = Math.max(0.25, +(statefulUi.pdfZoom / 1.3).toFixed(2)); render(); return;
       case "viewer-fit-page":
-      case "viewer-fit-width":
-      case "viewer-rotate":
+      case "viewer-fit-width": statefulUi.pdfZoom = 1.0; render(); return;
+      case "viewer-rotate": {
+        const proj = getActiveProject(); if (!proj) return;
+        const sid = state.settings.activeDrawingIdByProject[proj.id];
+        const drawing = sid && findById(state.drawings, sid);
+        if (drawing) { drawing.rotation = (((drawing.rotation || 0) + 90) % 360); await saveAndRender(); }
+        return;
+      }
+      case "start-two-point-calibration": statefulUi.calibrationMode = true; statefulUi.calibrationPoints = []; render(); return;
+      case "cancel-calibration-mode": statefulUi.calibrationMode = false; statefulUi.calibrationPoints = []; render(); return;
+      case "cancel-drawing-tool": statefulUi.selectedMeasurementTool = ""; statefulUi.drawingInProgress = null; render(); return;
       case "viewer-undo":
       case "viewer-redo":
       case "noop": pushToast(`${target.textContent.trim()} is a UI placeholder.`); render(); return;
@@ -2439,6 +2524,15 @@
       sheetId: data.sheetId,
       createdAt: nowIso(),
     };
+    const ax = optionalNumber(data.twoPointAx), ay = optionalNumber(data.twoPointAy);
+    const bx = optionalNumber(data.twoPointBx), by = optionalNumber(data.twoPointBy);
+    const hasTwoPoints = ax != null && ay != null && bx != null && by != null;
+    const realDistFt = optionalNumber(data.twoPointRealDistanceFt);
+    let scaleRatioPctToFeet = existing?.scaleRatioPctToFeet || null;
+    if (hasTwoPoints && realDistFt && realDistFt > 0) {
+      const normDist = Math.sqrt(Math.pow(bx - ax, 2) + Math.pow(by - ay, 2));
+      if (normDist > 0) scaleRatioPctToFeet = realDistFt / normDist;
+    }
     Object.assign(row, {
       scaleValue: cleanText(data.scaleValue),
       scaleSource: data.scaleSource,
@@ -2446,8 +2540,8 @@
       scaleLocked: data.scaleLocked === "true",
       calibratedBy: cleanText(data.calibratedBy) || state.settings.userName || "Estimator",
       calibratedAt: nowIso(),
-      twoPointDistance: cleanText(data.twoPointDistance),
-      pixelsPerFoot: optionalNumber(data.pixelsPerFoot),
+      twoPointRealDistanceFt: realDistFt,
+      scaleRatioPctToFeet,
       multiScaleZones: cleanText(data.multiScaleZones).split(/\n+/).filter(Boolean),
       updatedAt: nowIso(),
     });
@@ -2820,6 +2914,176 @@
     return true;
   }
 
+  async function ensurePageRender(drawingId, pageNum) {
+    const key = `${drawingId}-p${pageNum || 1}`;
+    if (statefulUi.pdfPageUrls.has(key)) return statefulUi.pdfPageUrls.get(key);
+    if (statefulUi.pdfPageRendering.has(key)) return null;
+    const fileUrl = await ensurePreviewUrl(drawingId);
+    if (!fileUrl) return null;
+    const drawing = findById(state.drawings, drawingId);
+    if (!drawing || !isPdf(drawing)) return null;
+    const svc = window.DrawingWorkspaceServices && window.DrawingWorkspaceServices.pdfPageRenderService;
+    if (!svc) return null;
+    statefulUi.pdfPageRendering.add(key);
+    render();
+    const result = await svc.renderPage(fileUrl, pageNum || 1);
+    statefulUi.pdfPageRendering.delete(key);
+    if (result && result.blobUrl) {
+      statefulUi.pdfPageUrls.set(key, result.blobUrl);
+      if (result.pageCount && !drawing.pageCount) drawing.pageCount = result.pageCount;
+      render();
+      return result.blobUrl;
+    }
+    render();
+    return null;
+  }
+
+  async function handleDrawingCanvasClick(x, y) {
+    const project = getActiveProject();
+    if (!project) return;
+    const sheetId = state.settings.activeDrawingIdByProject[project.id];
+    if (!sheetId) return;
+
+    if (statefulUi.calibrationMode) {
+      statefulUi.calibrationPoints.push({ x, y });
+      if (statefulUi.calibrationPoints.length >= 2) {
+        statefulUi.calibrationMode = false;
+        openModal("scaleCalibration", {
+          sheetId,
+          twoPointA: statefulUi.calibrationPoints[0],
+          twoPointB: statefulUi.calibrationPoints[1],
+        });
+        statefulUi.calibrationPoints = [];
+      }
+      render();
+      return;
+    }
+
+    const tool = statefulUi.selectedMeasurementTool;
+    if (!tool) return;
+
+    if (tool === "count") {
+      const measurement = buildDrawingMeasurement(project.id, sheetId, "count", { kind: "point", x, y }, 1, "EA");
+      state.drawingMeasurements.push(measurement);
+      statefulUi.selectedMeasurementId = measurement.id;
+      addActivity(state, project.id, "drawing.manual_measurement", `Added count measurement.`);
+      await saveAndRender("Count item added.");
+      return;
+    }
+
+    if (!statefulUi.drawingInProgress || statefulUi.drawingInProgress.sheetId !== sheetId) {
+      statefulUi.drawingInProgress = { tool, points: [{ x, y }], sheetId, projectId: project.id };
+      render();
+      return;
+    }
+
+    statefulUi.drawingInProgress.points.push({ x, y });
+    const pts = statefulUi.drawingInProgress.points;
+
+    if (tool === "line" && pts.length >= 2) {
+      await finalizeMeasurement(project, sheetId, "line");
+    } else if (tool === "rectangle" && pts.length >= 2) {
+      await finalizeMeasurement(project, sheetId, "rectangle");
+    } else if (tool === "deduct" && pts.length >= 2) {
+      await finalizeMeasurement(project, sheetId, "deduct");
+    } else {
+      render();
+    }
+  }
+
+  async function finalizeMeasurement(project, sheetId, type) {
+    const inProgress = statefulUi.drawingInProgress;
+    if (!inProgress) return;
+    const pts = inProgress.points;
+    const calibration = state.drawingScaleCalibrations.find((c) => c.sheetId === sheetId);
+    let geometry, quantity, unit;
+
+    if (type === "line") {
+      const dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
+      geometry = { kind: "line", points: [pts[0], pts[1]] };
+      quantity = scaleNormToFeet(Math.sqrt(dx * dx + dy * dy), calibration);
+      unit = "LF";
+    } else if (type === "polyline") {
+      let len = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+        len += Math.sqrt(dx * dx + dy * dy);
+      }
+      geometry = { kind: "polyline", points: [...pts] };
+      quantity = scaleNormToFeet(len, calibration);
+      unit = "LF";
+    } else if (type === "rectangle") {
+      const x = Math.min(pts[0].x, pts[1].x), y = Math.min(pts[0].y, pts[1].y);
+      const w = Math.abs(pts[1].x - pts[0].x), h = Math.abs(pts[1].y - pts[0].y);
+      geometry = { kind: "rect", x, y, width: w, height: h };
+      quantity = scaleNormToSF(w * h, calibration);
+      unit = "SF";
+    } else if (type === "area" || type === "polygon") {
+      geometry = { kind: "polygon", points: [...pts] };
+      quantity = scaleNormToSF(shoelaceArea(pts), calibration);
+      unit = "SF";
+    } else if (type === "deduct") {
+      const x = Math.min(pts[0].x, pts[1].x), y = Math.min(pts[0].y, pts[1].y);
+      const w = Math.abs(pts[1].x - pts[0].x), h = Math.abs(pts[1].y - pts[0].y);
+      geometry = { kind: "rect", x, y, width: w, height: h };
+      quantity = -(scaleNormToSF(w * h, calibration));
+      unit = "SF";
+    }
+
+    const measurement = buildDrawingMeasurement(project.id, sheetId, type, geometry,
+      quantity != null ? Math.round(quantity * 100) / 100 : null, unit, calibration);
+    state.drawingMeasurements.push(measurement);
+    statefulUi.selectedMeasurementId = measurement.id;
+    statefulUi.drawingInProgress = null;
+    addActivity(state, project.id, "drawing.manual_measurement", `Added ${type} measurement.`);
+    await saveAndRender(`${titleCase(type)} measurement added.`);
+  }
+
+  function buildDrawingMeasurement(projectId, sheetId, type, geometry, quantity, unit, calibration) {
+    return {
+      id: createId("dm"),
+      projectId,
+      sheetId,
+      drawingId: sheetId,
+      label: titleCase(type),
+      type,
+      category: "custom",
+      geometry,
+      quantity,
+      unit: unit || "SF",
+      confidence: calibration && calibration.scaleRatioPctToFeet ? 95 : 50,
+      status: "detected",
+      createdBy: "user",
+      source: "manual",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+  }
+
+  function scaleNormToFeet(normDist, calibration) {
+    if (calibration && calibration.scaleRatioPctToFeet) return normDist * calibration.scaleRatioPctToFeet;
+    return normDist;
+  }
+
+  function scaleNormToSF(normArea, calibration) {
+    if (calibration && calibration.scaleRatioPctToFeet) return normArea * calibration.scaleRatioPctToFeet * calibration.scaleRatioPctToFeet;
+    return normArea;
+  }
+
+  function shoelaceArea(pts) {
+    let area = 0;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+    }
+    return Math.abs(area / 2);
+  }
+
+  function clampCoord(v) {
+    return Math.max(0, Math.min(100, Number(v) || 0));
+  }
+
   function selectedClass(type, id) {
     if (type === "measurement" && statefulUi.selectedMeasurementId === id) return "selected";
     if (type === "issue" && statefulUi.selectedIssueId === id) return "selected";
@@ -2888,8 +3152,18 @@
     const project = getActiveProject();
     if (statefulUi.route !== "drawing-viewer" || !project) return;
     const id = state.settings.activeDrawingIdByProject[project.id] || filterByProject(state.drawings, project.id)[0]?.id;
-    if (id && !statefulUi.previewUrls.has(id)) {
-      ensurePreviewUrl(id).then(() => render());
+    if (!id) return;
+    const page = statefulUi.viewerPageByDrawingId[id] || 1;
+    const pageKey = `${id}-p${page}`;
+    if (!statefulUi.previewUrls.has(id)) {
+      ensurePreviewUrl(id).then(() => {
+        const drawing = findById(state.drawings, id);
+        if (drawing && isPdf(drawing)) ensurePageRender(id, page);
+        else render();
+      });
+    } else if (!statefulUi.pdfPageUrls.has(pageKey) && !statefulUi.pdfPageRendering.has(pageKey)) {
+      const drawing = findById(state.drawings, id);
+      if (drawing && isPdf(drawing)) ensurePageRender(id, page);
     }
   }
 

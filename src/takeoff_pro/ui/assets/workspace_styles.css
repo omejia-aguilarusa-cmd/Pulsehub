@@ -1744,6 +1744,18 @@ polyline.measurement-overlay {
   color: #1e3a8a;
 }
 
+.notice.ok {
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.pdf-page-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .mobile-overlay {
   display: none;
 }

@@ -70,8 +70,8 @@
       { action: "set-measurement-tool", tool: "deduct", label: "Deduct opening" },
       { action: "set-measurement-tool", tool: "exclusion", label: "Exclusion" },
       { action: "set-measurement-tool", tool: "assembly", label: "Assembly" },
-      { action: "open-scale-modal", label: "Scale calibration" },
-      { action: "add-sample-manual-measurement", label: "Add sample" },
+      { action: "open-scale-modal", label: "Scale (preset)" },
+      { action: "start-two-point-calibration", label: "Two-point calibrate", primary: false },
       { action: "viewer-undo", label: "Undo" },
       { action: "viewer-redo", label: "Redo" },
     ],
@@ -1081,6 +1081,69 @@
     return new Promise((resolve) => global.setTimeout(resolve, ms));
   }
 
+  // ---------------------------------------------------------------------------
+  // PDF page render service — renders PDF pages to blob-URL images via pdf.js
+  // ---------------------------------------------------------------------------
+  const pdfPageRenderService = (function () {
+    const _pageCache = new Map(); // `${fileUrl}-p${pageNum}` → { blobUrl, pageCount }
+    const _docCache = new Map();  // fileUrl → Promise<PDFDocumentProxy>
+
+    function _getDoc(fileUrl) {
+      if (_docCache.has(fileUrl)) return _docCache.get(fileUrl);
+      if (!global.pdfjsLib) return Promise.reject(new Error("pdf.js not loaded"));
+      const p = global.pdfjsLib.getDocument(fileUrl).promise;
+      _docCache.set(fileUrl, p);
+      return p;
+    }
+
+    async function renderPage(fileUrl, pageNum) {
+      const key = `${fileUrl}-p${pageNum || 1}`;
+      if (_pageCache.has(key)) return _pageCache.get(key);
+      try {
+        const doc = await _getDoc(fileUrl);
+        const page = await doc.getPage(pageNum || 1);
+        const viewport = page.getViewport({ scale: 1.8 });
+        const canvas = global.document.createElement("canvas");
+        canvas.width = Math.round(viewport.width);
+        canvas.height = Math.round(viewport.height);
+        const ctx = canvas.getContext("2d");
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        const blobUrl = await new Promise((res, rej) =>
+          canvas.toBlob((b) => (b ? res(URL.createObjectURL(b)) : rej(new Error("toBlob failed"))), "image/png")
+        );
+        const result = { blobUrl, width: canvas.width, height: canvas.height, pageCount: doc.numPages };
+        _pageCache.set(key, result);
+        return result;
+      } catch (err) {
+        console.warn("[pdfPageRenderService] render failed:", err);
+        return null;
+      }
+    }
+
+    function clearFile(fileUrl) {
+      for (const [k, v] of _pageCache) {
+        if (k.startsWith(fileUrl + "-p")) {
+          if (v && v.blobUrl) URL.revokeObjectURL(v.blobUrl);
+          _pageCache.delete(k);
+        }
+      }
+      _docCache.delete(fileUrl);
+    }
+
+    function parseScaleToFeetPerUnit(scaleString) {
+      if (!scaleString) return null;
+      const m1 = scaleString.match(/(\d+)\/(\d+)"\s*=\s*1['`’\-]/);
+      if (m1) return 12 / (Number(m1[1]) / Number(m1[2]));
+      const m2 = scaleString.match(/(\d+)"\s*=\s*1['`’\-]/);
+      if (m2) return 12 / Number(m2[1]);
+      const m3 = scaleString.match(/1"\s*=\s*(\d+)'/);
+      if (m3) return Number(m3[1]);
+      return null;
+    }
+
+    return { renderPage, clearFile, parseScaleToFeetPerUnit };
+  })();
+
   global.DrawingWorkspaceServices = {
     DEFAULT_DRAWING_LAYERS,
     SHEET_FILTERS,
@@ -1111,5 +1174,6 @@
     searchService: {
       search: searchDrawingWorkspace,
     },
+    pdfPageRenderService,
   };
 })(typeof window !== "undefined" ? window : globalThis);
