@@ -1146,6 +1146,21 @@ tr:last-child td {
   border-radius: 10px;
   background: #d7d9dd;
   overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.drawing-stage:active {
+  cursor: grabbing;
+}
+
+.drawing-stage.mode-measure {
+  cursor: crosshair;
+}
+
+.drawing-stage.mode-count {
+  cursor: cell;
 }
 
 .drawing-content-wrap,

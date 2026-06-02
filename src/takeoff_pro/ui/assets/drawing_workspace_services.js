@@ -1111,7 +1111,8 @@
         const blobUrl = await new Promise((res, rej) =>
           canvas.toBlob((b) => (b ? res(URL.createObjectURL(b)) : rej(new Error("toBlob failed"))), "image/png")
         );
-        const result = { blobUrl, width: canvas.width, height: canvas.height, pageCount: doc.numPages };
+        const unscaled = page.getViewport({ scale: 1 });
+        const result = { blobUrl, width: canvas.width, height: canvas.height, pageCount: doc.numPages, pdfWidthPt: unscaled.width, pdfHeightPt: unscaled.height };
         _pageCache.set(key, result);
         return result;
       } catch (err) {
@@ -1131,13 +1132,17 @@
     }
 
     function parseScaleToFeetPerUnit(scaleString) {
-      if (!scaleString) return null;
-      const m1 = scaleString.match(/(\d+)\/(\d+)"\s*=\s*1['`’\-]/);
-      if (m1) return 12 / (Number(m1[1]) / Number(m1[2]));
-      const m2 = scaleString.match(/(\d+)"\s*=\s*1['`’\-]/);
-      if (m2) return 12 / Number(m2[1]);
-      const m3 = scaleString.match(/1"\s*=\s*(\d+)'/);
-      if (m3) return Number(m3[1]);
+      // Returns real feet per paper inch for the given scale string.
+      // e.g. "1/8\" = 1’-0\"" → 8  (1 paper inch = 8 real feet)
+      //      "1/4\" = 1’-0\"" → 4
+      //      "1\" = 1’-0\""  → 1
+      if (!scaleString || scaleString === "Custom") return null;
+      const m1 = scaleString.match(/(\d+)\/(\d+)"\s*=\s*1[‘’\-]/);
+      if (m1) return Number(m1[2]) / Number(m1[1]); // e.g. 8/1 = 8 ft/in for "1/8"=1’"
+      const m2 = scaleString.match(/(\d+)"\s*=\s*1[‘’\-]/);
+      if (m2) return 1 / Number(m2[1]); // e.g. 1/2 ft/in for "2"=1’"
+      const m3 = scaleString.match(/1"\s*=\s*(\d+)’/);
+      if (m3) return Number(m3[1]); // e.g. 10 ft/in for "1"=10’"
       return null;
     }
 

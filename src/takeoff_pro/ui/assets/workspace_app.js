@@ -80,6 +80,8 @@
     aiProcessingState: null,
     aiTakeoffStage: "",
     pdfZoom: 1.0,
+    pdfPanX: 0,
+    pdfPanY: 0,
     pdfPageUrls: new Map(),
     pdfPageRendering: new Set(),
     drawingInProgress: null,
@@ -226,6 +228,44 @@
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("change", handleChange);
   document.addEventListener("input", handleInput);
+
+  let _panDrag = null;
+  let _dragMoved = false;
+  document.addEventListener("pointerdown", (e) => {
+    const stageEl = e.target.closest(".drawing-stage");
+    if (!stageEl || e.target.closest("[data-action]") || e.button !== 0) return;
+    _panDrag = { startX: e.clientX, startY: e.clientY, startPanX: statefulUi.pdfPanX, startPanY: statefulUi.pdfPanY };
+    _dragMoved = false;
+    try { stageEl.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  document.addEventListener("pointermove", (e) => {
+    if (!_panDrag) return;
+    const dx = e.clientX - _panDrag.startX, dy = e.clientY - _panDrag.startY;
+    if (!_dragMoved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+    _dragMoved = true;
+    statefulUi.pdfPanX = _panDrag.startPanX + dx;
+    statefulUi.pdfPanY = _panDrag.startPanY + dy;
+    render();
+  });
+  document.addEventListener("pointerup", () => { _panDrag = null; });
+  document.addEventListener("wheel", (e) => {
+    const stageEl = e.target.closest(".drawing-stage");
+    if (!stageEl) return;
+    e.preventDefault();
+    const rect = stageEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const stageW = rect.width, stageH = rect.height;
+    const oldZoom = statefulUi.pdfZoom || 1;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newZoom = Math.max(0.2, Math.min(6, +(oldZoom * factor).toFixed(3)));
+    const panX = statefulUi.pdfPanX, panY = statefulUi.pdfPanY;
+    const cx = (mx - panX - stageW / 2) / oldZoom;
+    const cy = (my - panY - stageH / 2) / oldZoom;
+    statefulUi.pdfZoom = newZoom;
+    statefulUi.pdfPanX = mx - cx * newZoom - stageW / 2;
+    statefulUi.pdfPanY = my - cy * newZoom - stageH / 2;
+    render();
+  }, { passive: false });
 
   // Drag-and-drop upload on the Documents drop zone.
   document.addEventListener("dragover", (e) => {
@@ -751,8 +791,8 @@
           <button class="button ghost" data-action="toggle-right-inspector" aria-label="${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}" aria-expanded="${statefulUi.rightInspectorCollapsed ? "false" : "true"}">${statefulUi.rightInspectorCollapsed ? "Show inspector" : "Hide inspector"}</button>
         </div>
       </div>
-      <div class="drawing-stage ${statefulUi.confidenceHeatmap ? "heatmap-enabled" : ""}">
-        <div class="drawing-content-wrap" style="transform:scale(${statefulUi.pdfZoom || 1});transform-origin:top left;">
+      <div class="drawing-stage ${statefulUi.confidenceHeatmap ? "heatmap-enabled" : ""} ${statefulUi.calibrationMode || statefulUi.selectedMeasurementTool === "count" ? "mode-count" : statefulUi.selectedMeasurementTool ? "mode-measure" : ""}">
+        <div class="drawing-content-wrap" style="transform-origin:center;transform:translate(${statefulUi.pdfPanX || 0}px,${statefulUi.pdfPanY || 0}px) scale(${statefulUi.pdfZoom || 1}) rotate(${Number(active && active.rotation) || 0}deg);">
           <div class="drawing-document-layer">
             ${renderDrawingPreview(active, page)}
           </div>
@@ -1815,10 +1855,9 @@
     // without hitting a [data-action] element.
     const stageEl = event.target.closest(".drawing-stage");
     if (stageEl && !event.target.closest("[data-action]")) {
+      if (_dragMoved) { _dragMoved = false; return; }
       const rect = stageEl.getBoundingClientRect();
-      const zoom = statefulUi.pdfZoom || 1;
-      const x = clampCoord(((event.clientX - rect.left) / zoom / rect.width) * 100);
-      const y = clampCoord(((event.clientY - rect.top) / zoom / rect.height) * 100);
+      const { x, y } = inverseTransformCoords(event.clientX, event.clientY, rect);
       await handleDrawingCanvasClick(x, y);
       return;
     }
@@ -1887,15 +1926,19 @@
       case "create-rfi-from-selected-issue": await createRfiFromSelectedIssue(); return;
       case "open-drawing-search-result": await openDrawingSearchResult(target); return;
       case "share-placeholder": pushToast("Share link placeholder. Connect to project permissions backend later."); render(); return;
-      case "viewer-zoom-in": statefulUi.pdfZoom = Math.min(4, +(statefulUi.pdfZoom * 1.3).toFixed(2)); render(); return;
-      case "viewer-zoom-out": statefulUi.pdfZoom = Math.max(0.25, +(statefulUi.pdfZoom / 1.3).toFixed(2)); render(); return;
+      case "viewer-zoom-in": statefulUi.pdfZoom = Math.min(6, +(statefulUi.pdfZoom * 1.3).toFixed(3)); render(); return;
+      case "viewer-zoom-out": statefulUi.pdfZoom = Math.max(0.2, +(statefulUi.pdfZoom / 1.3).toFixed(3)); render(); return;
       case "viewer-fit-page":
-      case "viewer-fit-width": statefulUi.pdfZoom = 1.0; render(); return;
+      case "viewer-fit-width": resetViewTransform(); render(); return;
       case "viewer-rotate": {
         const proj = getActiveProject(); if (!proj) return;
         const sid = state.settings.activeDrawingIdByProject[proj.id];
         const drawing = sid && findById(state.drawings, sid);
-        if (drawing) { drawing.rotation = (((drawing.rotation || 0) + 90) % 360); await saveAndRender(); }
+        if (drawing) {
+          drawing.rotation = (((drawing.rotation || 0) + 90) % 360);
+          resetViewTransform();
+          await saveAndRender();
+        }
         return;
       }
       case "start-two-point-calibration": statefulUi.calibrationMode = true; statefulUi.calibrationPoints = []; render(); return;
@@ -2250,6 +2293,8 @@
     const rfi = findById(state.rfis, statefulUi.selectedRfiId);
     if (rfi && (rfi.sheetId || rfi.drawingId) !== id) statefulUi.selectedRfiId = null;
     statefulUi.selectedIssueId = null;
+    statefulUi.drawingInProgress = null;
+    resetViewTransform();
     await ensurePreviewUrl(id);
     await saveAndRender();
   }
@@ -2599,6 +2644,16 @@
     if (hasTwoPoints && realDistFt && realDistFt > 0) {
       const normDist = Math.sqrt(Math.pow(bx - ax, 2) + Math.pow(by - ay, 2));
       if (normDist > 0) scaleRatioPctToFeet = realDistFt / normDist;
+    } else if (data.scaleSource === "manual" && data.scaleValue && data.scaleValue !== "Custom") {
+      // Auto-compute from preset + PDF page width (if available from pdf.js render)
+      const svc = window.DrawingWorkspaceServices && window.DrawingWorkspaceServices.pdfPageRenderService;
+      const feetPerPaperInch = svc ? svc.parseScaleToFeetPerUnit(data.scaleValue) : null;
+      const drawing = data.sheetId ? findById(state.drawings, data.sheetId) : null;
+      if (feetPerPaperInch && drawing && drawing.pdfWidthPt) {
+        // pdfWidthPt is in PDF points (1 point = 1/72 inch)
+        const paperWidthInches = drawing.pdfWidthPt / 72;
+        scaleRatioPctToFeet = (paperWidthInches * feetPerPaperInch) / 100;
+      }
     }
     Object.assign(row, {
       scaleValue: cleanText(data.scaleValue),
@@ -2998,6 +3053,8 @@
     if (result && result.blobUrl) {
       statefulUi.pdfPageUrls.set(key, result.blobUrl);
       if (result.pageCount && !drawing.pageCount) drawing.pageCount = result.pageCount;
+      if (result.pdfWidthPt && !drawing.pdfWidthPt) drawing.pdfWidthPt = result.pdfWidthPt;
+      if (result.pdfHeightPt && !drawing.pdfHeightPt) drawing.pdfHeightPt = result.pdfHeightPt;
       render();
       return result.blobUrl;
     }
@@ -3149,6 +3206,36 @@
 
   function clampCoord(v) {
     return Math.max(0, Math.min(100, Number(v) || 0));
+  }
+
+  function inverseTransformCoords(clientX, clientY, rect) {
+    // Reverses: translate(panX, panY) scale(zoom) rotate(rot) with transform-origin: center
+    const zoom = statefulUi.pdfZoom || 1;
+    const panX = statefulUi.pdfPanX || 0;
+    const panY = statefulUi.pdfPanY || 0;
+    const stageW = rect.width, stageH = rect.height;
+    const project = getActiveProject();
+    const activeId = project && state.settings.activeDrawingIdByProject[project.id];
+    const drawing = activeId && findById(state.drawings, activeId);
+    const rot = drawing ? (Number(drawing.rotation) || 0) : 0;
+    const relX = clientX - rect.left, relY = clientY - rect.top;
+    // Un-translate and un-scale (from center)
+    const dx = (relX - panX - stageW / 2) / zoom;
+    const dy = (relY - panY - stageH / 2) / zoom;
+    // Un-rotate (positive rot angle applied CW → inverse is CCW)
+    const angle = rot * Math.PI / 180;
+    const rx = dx * Math.cos(angle) + dy * Math.sin(angle);
+    const ry = -dx * Math.sin(angle) + dy * Math.cos(angle);
+    return {
+      x: clampCoord((rx + stageW / 2) / stageW * 100),
+      y: clampCoord((ry + stageH / 2) / stageH * 100),
+    };
+  }
+
+  function resetViewTransform() {
+    statefulUi.pdfZoom = 1.0;
+    statefulUi.pdfPanX = 0;
+    statefulUi.pdfPanY = 0;
   }
 
   function selectedClass(type, id) {
@@ -3865,6 +3952,29 @@
       event.preventDefault();
       toggleRightInspector();
       return;
+    }
+    if (event.key === "Escape") {
+      if (statefulUi.calibrationMode) {
+        statefulUi.calibrationMode = false;
+        statefulUi.calibrationPoints = [];
+        render();
+        return;
+      }
+      if (statefulUi.drawingInProgress) {
+        if (statefulUi.drawingInProgress.points.length > 1) {
+          statefulUi.drawingInProgress.points.pop(); // undo last point
+        } else {
+          statefulUi.drawingInProgress = null;
+          statefulUi.selectedMeasurementTool = "";
+        }
+        render();
+        return;
+      }
+      if (statefulUi.selectedMeasurementTool) {
+        statefulUi.selectedMeasurementTool = "";
+        render();
+        return;
+      }
     }
     if (isTyping || statefulUi.route !== "drawing-viewer") return;
     const key = event.key.toLowerCase();
