@@ -215,38 +215,268 @@
     }));
   }
 
-  async function runPaintingTakeoff(options) {
-    await sleep(250);
-    if (typeof options.onProgress === "function") options.onProgress("Processing PDF", 20);
-    await sleep(250);
-    if (typeof options.onProgress === "function") options.onProgress("Calibrating Scale", 35);
-    await sleep(250);
-    if (typeof options.onProgress === "function") options.onProgress("Detecting Rooms", 55);
-    await sleep(250);
-    if (typeof options.onProgress === "function") options.onProgress("Measuring", 72);
-    await sleep(250);
-    if (typeof options.onProgress === "function") options.onProgress("Building Quantities", 90);
+  // ---------------------------------------------------------------------------
+  // LM Studio integration helpers
+  // ---------------------------------------------------------------------------
+
+  function openTakeoffDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open("takeoff-workspace", 1);
+      req.onerror = () => reject(req.error || new Error("Could not open workspace database."));
+      req.onsuccess = () => resolve(req.result);
+      req.onupgradeneeded = () => {};
+    });
+  }
+
+  function getTakeoffFile(db, id) {
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction("files", "readonly");
+        const req = tx.objectStore("files").get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function isImageBlob(blob) {
+    return blob instanceof Blob && (blob.type || "").startsWith("image/");
+  }
+
+  async function checkLmStudioHealth(baseUrl, apiKey, requestedModel) {
+    const modelsUrl = baseUrl.replace(/\/+$/, "") + "/models";
+    try {
+      const resp = await fetch(modelsUrl, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) {
+        return { reachable: false, models: [], modelLoaded: false, error: `Server returned ${resp.status}` };
+      }
+      const data = await resp.json();
+      const models = (Array.isArray(data.data) ? data.data : [])
+        .filter((m) => m && typeof m.id === "string")
+        .map((m) => m.id);
+      const modelLoaded = !requestedModel || models.includes(requestedModel);
+      return { reachable: true, models, modelLoaded, error: null };
+    } catch (err) {
+      const msg = err && err.name === "AbortError" ? "Health check timed out." : String(err);
+      return { reachable: false, models: [], modelLoaded: false, error: msg };
+    }
+  }
+
+  async function callLmStudioChatCompletion(chatUrl, apiKey, model, messages, maxTokens) {
+    const body = {
+      model,
+      messages,
+      max_tokens: maxTokens || 4096,
+      response_format: { type: "json_object" },
+    };
+    const controller = new AbortController();
+    const tid = global.setTimeout(() => controller.abort(), 120000);
+    try {
+      const resp = await fetch(chatUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      global.clearTimeout(tid);
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const e = await resp.json(); detail = (e.error && e.error.message) || detail; } catch (_) {}
+        if (resp.status === 404) throw new Error(`Wrong endpoint: ${chatUrl} returned 404. Check AI_BASE_URL ends with /v1.`);
+        if (resp.status === 503) throw new Error(`Model not loaded or LM Studio busy (503): ${detail}`);
+        if (resp.status === 422 || resp.status === 400) throw new Error(`Bad request (${resp.status}) — image format may be unsupported: ${detail}`);
+        throw new Error(`AI provider request failed: ${detail}`);
+      }
+      const data = await resp.json();
+      const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+      if (typeof content !== "string" || !content.trim()) throw new Error("LM Studio response did not include content.");
+      return content.trim();
+    } catch (err) {
+      global.clearTimeout(tid);
+      if (err && err.name === "AbortError") throw new Error("LM Studio request timed out (120 s). Try a shorter prompt or smaller image.");
+      throw err;
+    }
+  }
+
+  function buildPaintingTakeoffPromptText(options, sheetId) {
+    const ch = options.ceilingHeightFt || 9;
+    const doors = options.includeDoors !== false;
+    const windows = options.includeWindows !== false;
+    const trim = options.includeTrim !== false;
+    return (
+      "You are an expert drywall and painting estimator analyzing architectural construction plans.\n" +
+      "Extract EVERY detail relevant to the drywall and paint scope. Do not guess — only report what is visible.\n" +
+      "If a quantity is estimated rather than directly measured, mark it in assumptions with your reasoning.\n" +
+      "Return strict JSON only. Do not include markdown fences.\n\n" +
+
+      "Scope: drywall and painting\n" +
+      "Prompt version: drywall-painting-takeoff-v2\n" +
+      `Default ceiling height: ${ch} ft\n` +
+      `Include doors: ${doors}\nInclude windows: ${windows}\nInclude trim: ${trim}\n\n` +
+
+      "PAINTING formulas (apply when perimeter/area are available):\n" +
+      "  wall_sf = perimeter_ft * ceiling_height_ft - door_count * 21 - window_count * 15\n" +
+      "  ceiling_sf = floor_area_sf\n" +
+      "  baseboard_lf = perimeter_ft\n" +
+      "  door_trim_lf = door_count * 17\n" +
+      "  window_trim_lf = window_count * 12\n" +
+      "  total_trim_lf = baseboard_lf + door_trim_lf + window_trim_lf\n\n" +
+
+      "DRYWALL formulas:\n" +
+      "  gwb_sf = length_lf * height_ft * gwb_layers (both sides of partition)\n" +
+      "  corner_bead_lf = number of outside corners * height_ft\n" +
+      "  acoustic_sealant_lf = base of all rated partitions\n\n" +
+
+      "Extract for EACH room or area:\n" +
+      "  - Room name, type, floor area SF, perimeter FT, wall SF, ceiling SF\n" +
+      "  - Door count, window count, trim LF\n" +
+      "  - Paint finish code or system if visible (e.g. P-1, eggshell, semi-gloss)\n\n" +
+
+      "Extract for EACH partition/wall assembly:\n" +
+      "  - Wall type ID (e.g. WT-1, W-3), length LF, height FT, area SF\n" +
+      "  - GWB layers (each side), stud size (e.g. 3-5/8\"), stud spacing\n" +
+      "  - Fire rating (1-hr, 2-hr, etc.), STC/sound rating if noted\n" +
+      "  - Whether shaft wall, corridor wall, or partition\n\n" +
+
+      "Extract for EACH ceiling assembly:\n" +
+      "  - Ceiling type (drywall, ACT, GWB, soffit, open), area SF\n" +
+      "  - Finish level if noted (Level 4, Level 5)\n\n" +
+
+      "Also extract overall:\n" +
+      "  - Total metal stud framing LF\n" +
+      "  - Total corner bead LF\n" +
+      "  - Total acoustic sealant LF\n" +
+      "  - Total GWB SF\n\n" +
+
+      `Pages:\n- pageId=${sheetId}\n\n` +
+
+      "Required JSON schema (fill every field; use null when unknown):\n" +
+      '{"rooms":[{"id":"string","name":"string","type":"office|bathroom|corridor|lobby|storage|mechanical|unknown","pageId":"string","locationDescription":"string","confidence":0.0,"floorAreaSf":null,"perimeterFt":null,"wallSf":null,"ceilingSf":null,"doorCount":0,"windowCount":0,"trimLf":null,"paintFinish":"string","assumptions":[]}],' +
+      '"drywallAssemblies":[{"id":"string","wallType":"string","pageId":"string","locationDescription":"string","lengthLf":null,"heightFt":null,"areaSf":null,"gwbLayers":1,"studSize":"string","studSpacing":"string","fireRating":"string","soundRating":"string","isShaftWall":false,"confidence":0.0,"assumptions":[]}],' +
+      '"ceilingAssemblies":[{"id":"string","ceilingType":"drywall|ACT|GWB|soffit|open|unknown","pageId":"string","locationDescription":"string","areaSf":null,"finishLevel":"string","confidence":0.0,"assumptions":[]}],' +
+      '"elements":[{"type":"door|window|wall|special_surface|note|unknown","count":0,"pageId":"string","locationDescription":"string","confidence":0.0}],' +
+      '"totals":{"floorAreaSf":0,"wallSf":0,"ceilingSf":0,"doorCount":0,"windowCount":0,"trimLf":0,"gwbSf":0,"metalStudLf":0,"cornerBeadLf":0,"acousticSealantLf":0},' +
+      '"warnings":[],"confidenceScore":0.0}'
+    );
+  }
+
+  function parseTakeoffJson(rawText, options, sheetIds, model, provider) {
+    const cleaned = rawText.replace(/^```(?:json)?\s*/m, "").replace(/\s*```\s*$/m, "").trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      throw new Error(`JSON parse failed: ${err.message}. Response: ${rawText.substring(0, 200)}`);
+    }
+    const rooms = Array.isArray(parsed.rooms) ? parsed.rooms : [];
+    const drywallAssemblies = Array.isArray(parsed.drywallAssemblies) ? parsed.drywallAssemblies : [];
+    const ceilingAssemblies = Array.isArray(parsed.ceilingAssemblies) ? parsed.ceilingAssemblies : [];
+    const elements = Array.isArray(parsed.elements) ? parsed.elements : [];
+    const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
+    const parsedTotals = (parsed.totals && typeof parsed.totals === "object") ? parsed.totals : {};
+    const totals = {
+      floorAreaSf: Number(parsedTotals.floorAreaSf) || rooms.reduce((s, r) => s + (Number(r.floorAreaSf) || 0), 0),
+      wallSf: Number(parsedTotals.wallSf) || rooms.reduce((s, r) => s + (Number(r.wallSf) || 0), 0),
+      ceilingSf: Number(parsedTotals.ceilingSf) || rooms.reduce((s, r) => s + (Number(r.ceilingSf) || 0), 0),
+      doorCount: Number(parsedTotals.doorCount) || rooms.reduce((s, r) => s + (Number(r.doorCount) || 0), 0),
+      windowCount: Number(parsedTotals.windowCount) || rooms.reduce((s, r) => s + (Number(r.windowCount) || 0), 0),
+      trimLf: Number(parsedTotals.trimLf) || rooms.reduce((s, r) => s + (Number(r.trimLf) || 0), 0),
+      gwbSf: Number(parsedTotals.gwbSf) || drywallAssemblies.reduce((s, a) => s + (Number(a.areaSf) || 0), 0),
+      metalStudLf: Number(parsedTotals.metalStudLf) || drywallAssemblies.reduce((s, a) => s + (Number(a.lengthLf) || 0), 0),
+      cornerBeadLf: Number(parsedTotals.cornerBeadLf) || 0,
+      acousticSealantLf: Number(parsedTotals.acousticSealantLf) || 0,
+    };
+    const allConfidences = [
+      ...rooms.map((r) => Number(r.confidence) || 0),
+      ...drywallAssemblies.map((a) => Number(a.confidence) || 0),
+    ];
+    const confidence = allConfidences.length
+      ? Math.round(allConfidences.reduce((s, c) => s + c, 0) / allConfidences.length * 100) / 100
+      : 0;
     const timestamp = nowIso();
-    const sheetIds = Array.isArray(options.pageIds) && options.pageIds.length ? options.pageIds : [];
     return {
       id: createId("ai-takeoff-run"),
       projectId: options.projectId,
-      status: "not_configured",
-      scope: "painting",
-      provider: "none",
-      model: "",
-      promptVersion: "painting-takeoff-v1",
+      status: "complete",
+      scope: "drywall-painting",
+      provider: provider || "lmstudio",
+      model: model || "",
+      promptVersion: "drywall-painting-takeoff-v2",
       pageIds: sheetIds,
       pages: sheetIds.map((pageId) => ({
         pageId,
-        rooms: [],
-        elements: [],
+        rooms: rooms.filter((r) => !r.pageId || r.pageId === pageId).map((r) => ({
+          id: r.id || createId("room"),
+          name: r.name || "Unnamed room",
+          type: r.type || "unknown",
+          pageId,
+          locationDescription: r.locationDescription || "",
+          confidence: Number(r.confidence) || 0,
+          floorAreaSf: r.floorAreaSf != null ? Number(r.floorAreaSf) : null,
+          perimeterFt: r.perimeterFt != null ? Number(r.perimeterFt) : null,
+          wallSf: r.wallSf != null ? Number(r.wallSf) : null,
+          ceilingSf: r.ceilingSf != null ? Number(r.ceilingSf) : null,
+          doorCount: Number(r.doorCount) || 0,
+          windowCount: Number(r.windowCount) || 0,
+          trimLf: r.trimLf != null ? Number(r.trimLf) : null,
+          paintFinish: r.paintFinish || "",
+          assumptions: Array.isArray(r.assumptions) ? r.assumptions : [],
+        })),
+        drywallAssemblies: drywallAssemblies.filter((a) => !a.pageId || a.pageId === pageId).map((a) => ({
+          id: a.id || createId("dw-asm"),
+          wallType: a.wallType || "Unknown",
+          pageId,
+          locationDescription: a.locationDescription || "",
+          lengthLf: a.lengthLf != null ? Number(a.lengthLf) : null,
+          heightFt: a.heightFt != null ? Number(a.heightFt) : null,
+          areaSf: a.areaSf != null ? Number(a.areaSf) : null,
+          gwbLayers: Number(a.gwbLayers) || 1,
+          studSize: a.studSize || "",
+          studSpacing: a.studSpacing || "",
+          fireRating: a.fireRating || "",
+          soundRating: a.soundRating || "",
+          isShaftWall: Boolean(a.isShaftWall),
+          confidence: Number(a.confidence) || 0,
+          assumptions: Array.isArray(a.assumptions) ? a.assumptions : [],
+        })),
+        ceilingAssemblies: ceilingAssemblies.filter((c) => !c.pageId || c.pageId === pageId).map((c) => ({
+          id: c.id || createId("ceil-asm"),
+          ceilingType: c.ceilingType || "unknown",
+          pageId,
+          locationDescription: c.locationDescription || "",
+          areaSf: c.areaSf != null ? Number(c.areaSf) : null,
+          finishLevel: c.finishLevel || "",
+          confidence: Number(c.confidence) || 0,
+          assumptions: Array.isArray(c.assumptions) ? c.assumptions : [],
+        })),
+        elements: elements.filter((e) => !e.pageId || e.pageId === pageId).map((e) => ({
+          type: e.type || "unknown",
+          count: Number(e.count) || 0,
+          pageId,
+          locationDescription: e.locationDescription || "",
+          confidence: Number(e.confidence) || 0,
+        })),
         measurements: [],
-        warnings: ["AI provider is not configured. Set AI_PROVIDER and a provider API key for vision extraction."],
+        warnings,
       })),
-      totals: { floorAreaSf: 0, wallSf: 0, ceilingSf: 0, doorCount: 0, windowCount: 0, trimLf: 0 },
-      confidenceScore: 0,
-      warnings: ["AI provider is not configured. The workspace remains usable for manual takeoff and export."],
+      totals,
+      confidenceScore: confidence,
+      warnings,
       options: {
         ceilingHeightFt: Number(options.ceilingHeightFt || 9),
         includeDoors: options.includeDoors !== false,
@@ -256,6 +486,345 @@
       createdAt: timestamp,
       updatedAt: timestamp,
     };
+  }
+
+  function makeFailedTakeoffRun(options, warningMessage, sheetIds, provider) {
+    const timestamp = nowIso();
+    return {
+      id: createId("ai-takeoff-run"),
+      projectId: options.projectId,
+      status: "failed",
+      scope: "painting",
+      provider: provider || "lmstudio",
+      model: "",
+      promptVersion: "painting-takeoff-v1",
+      pageIds: sheetIds,
+      pages: sheetIds.map((pageId) => ({
+        pageId, rooms: [], elements: [], measurements: [], warnings: [warningMessage],
+      })),
+      totals: { floorAreaSf: 0, wallSf: 0, ceilingSf: 0, doorCount: 0, windowCount: 0, trimLf: 0 },
+      confidenceScore: 0,
+      warnings: [warningMessage],
+      options: {
+        ceilingHeightFt: Number(options.ceilingHeightFt || 9),
+        includeDoors: options.includeDoors !== false,
+        includeWindows: options.includeWindows !== false,
+        includeTrim: options.includeTrim !== false,
+      },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cloud provider helpers — OpenAI and Anthropic
+  // ---------------------------------------------------------------------------
+
+  async function callOpenAiChatCompletion(apiKey, model, messages, maxTokens) {
+    const body = {
+      model: model || "gpt-4o",
+      messages,
+      max_tokens: maxTokens || 4096,
+      response_format: { type: "json_object" },
+    };
+    const controller = new AbortController();
+    const tid = global.setTimeout(() => controller.abort(), 120000);
+    try {
+      const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      global.clearTimeout(tid);
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const e = await resp.json(); detail = (e.error && e.error.message) || detail; } catch (_) {}
+        if (resp.status === 401) throw new Error(`OpenAI API key is invalid or missing. Check OPENAI_API_KEY in your .env file. (${detail})`);
+        if (resp.status === 429) throw new Error(`OpenAI rate limit reached. Wait and try again. (${detail})`);
+        throw new Error(`OpenAI request failed: ${detail}`);
+      }
+      const data = await resp.json();
+      const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+      if (typeof content !== "string" || !content.trim()) throw new Error("OpenAI response did not include content.");
+      return content.trim();
+    } catch (err) {
+      global.clearTimeout(tid);
+      if (err && err.name === "AbortError") throw new Error("OpenAI request timed out (120 s).");
+      throw err;
+    }
+  }
+
+  async function callAnthropicMessages(apiKey, model, messages, maxTokens) {
+    const body = {
+      model: model || "claude-3-5-sonnet-latest",
+      max_tokens: maxTokens || 4096,
+      messages,
+    };
+    const controller = new AbortController();
+    const tid = global.setTimeout(() => controller.abort(), 120000);
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      global.clearTimeout(tid);
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const e = await resp.json(); detail = (e.error && e.error.message) || detail; } catch (_) {}
+        if (resp.status === 401) throw new Error(`Anthropic API key is invalid or missing. Check ANTHROPIC_API_KEY in your .env file. (${detail})`);
+        throw new Error(`Anthropic request failed: ${detail}`);
+      }
+      const data = await resp.json();
+      const item = Array.isArray(data.content) && data.content.find((c) => c.type === "text");
+      if (!item || typeof item.text !== "string" || !item.text.trim()) throw new Error("Anthropic response did not include text content.");
+      return item.text.trim();
+    } catch (err) {
+      global.clearTimeout(tid);
+      if (err && err.name === "AbortError") throw new Error("Anthropic request timed out (120 s).");
+      throw err;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real painting takeoff — calls LM Studio, OpenAI, or Anthropic based on
+  // TAKEOFF_AI_CONFIG injected by the Python host at startup.
+  // ---------------------------------------------------------------------------
+
+  async function runPaintingTakeoff(options) {
+    const config = typeof global.TAKEOFF_AI_CONFIG === "object" && global.TAKEOFF_AI_CONFIG
+      ? global.TAKEOFF_AI_CONFIG : null;
+    const sheetIds = Array.isArray(options.pageIds) && options.pageIds.length ? options.pageIds : [];
+    const provider = config && config.provider ? config.provider : "";
+
+    // No recognised provider — return not_configured stub
+    if (!config || !["lmstudio", "openai", "anthropic", "deepseek"].includes(provider)) {
+      await sleep(300);
+      const timestamp = nowIso();
+      const note = config && config.oauthNote ? config.oauthNote : "";
+      const warnMsg = provider === "openai_oauth"
+        ? note || "OpenAI OAuth is not supported for desktop apps. Set AI_PROVIDER=openai and OPENAI_API_KEY."
+        : "AI provider is not configured. Set AI_PROVIDER in your .env file (openai, anthropic, or lmstudio) and restart.";
+      return {
+        id: createId("ai-takeoff-run"),
+        projectId: options.projectId,
+        status: "not_configured",
+        scope: "painting",
+        provider: "none",
+        model: "",
+        promptVersion: "painting-takeoff-v1",
+        pageIds: sheetIds,
+        pages: sheetIds.map((pageId) => ({
+          pageId, rooms: [], elements: [], measurements: [], warnings: [warnMsg],
+        })),
+        totals: { floorAreaSf: 0, wallSf: 0, ceilingSf: 0, doorCount: 0, windowCount: 0, trimLf: 0 },
+        confidenceScore: 0,
+        warnings: [warnMsg],
+        options: {
+          ceilingHeightFt: Number(options.ceilingHeightFt || 9),
+          includeDoors: options.includeDoors !== false,
+          includeWindows: options.includeWindows !== false,
+          includeTrim: options.includeTrim !== false,
+        },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+    }
+
+    const apiKey = config.apiKey || "";
+    const model = config.takeoffModel || config.chatModel || "";
+    const maxTokens = config.maxTokens || 4096;
+
+    // Validate API key for cloud providers before making any network calls.
+    if ((provider === "openai" || provider === "anthropic" || provider === "deepseek") && !apiKey) {
+      const keyVar = provider === "openai" ? "OPENAI_API_KEY" : provider === "deepseek" ? "DEEPSEEK_API_KEY" : "ANTHROPIC_API_KEY";
+      return makeFailedTakeoffRun(
+        options,
+        `${provider} API key is missing. Set ${keyVar} in your .env file and restart.`,
+        sheetIds,
+        provider
+      );
+    }
+
+    if (typeof options.onProgress === "function") options.onProgress("Checking AI provider", 5);
+
+    // ---------------------------------------------------------------------------
+    // LM Studio path
+    // ---------------------------------------------------------------------------
+    if (provider === "lmstudio") {
+      const baseUrl = (config.baseUrl || "http://127.0.0.1:1234/v1").replace(/\/+$/, "");
+
+      const health = await checkLmStudioHealth(baseUrl, apiKey || "lm-studio-local", model);
+      if (!health.reachable) {
+        return makeFailedTakeoffRun(
+          options,
+          `LM Studio is not reachable at ${baseUrl}. Start LM Studio and enable the Local Server. (${health.error || ""})`,
+          sheetIds,
+          "lmstudio"
+        );
+      }
+      if (model && !health.modelLoaded) {
+        const loaded = health.models.length ? health.models.join(", ") : "none";
+        return makeFailedTakeoffRun(
+          options,
+          `Model '${model}' is not loaded in LM Studio. Loaded: ${loaded}. Load the required model and try again.`,
+          sheetIds,
+          "lmstudio"
+        );
+      }
+
+      if (typeof options.onProgress === "function") options.onProgress("Loading drawing", 15);
+
+      const sheetId = sheetIds[0] || null;
+      let imageDataUrl = null;
+      if (sheetId) {
+        try {
+          const db = await openTakeoffDb();
+          const file = await getTakeoffFile(db, sheetId);
+          if (isImageBlob(file)) imageDataUrl = await blobToDataUrl(file);
+        } catch (_) {}
+      }
+
+      if (typeof options.onProgress === "function") options.onProgress("Running AI analysis", 30);
+
+      const promptText = buildPaintingTakeoffPromptText(options, sheetId || "unknown");
+      const effectiveModel = model || (health.models.length ? health.models[0] : "");
+      const messages = imageDataUrl
+        ? [{ role: "user", content: [
+            { type: "text", text: promptText },
+            { type: "image_url", image_url: { url: imageDataUrl } },
+          ] }]
+        : [{ role: "user", content: promptText }];
+
+      if (typeof options.onProgress === "function") options.onProgress("Waiting for AI response", 50);
+
+      let rawText;
+      try {
+        rawText = await callLmStudioChatCompletion(
+          baseUrl + "/chat/completions", apiKey || "lm-studio-local", effectiveModel, messages, maxTokens
+        );
+      } catch (err) {
+        return makeFailedTakeoffRun(options, String(err), sheetIds, "lmstudio");
+      }
+
+      if (typeof options.onProgress === "function") options.onProgress("Parsing results", 85);
+      try {
+        return parseTakeoffJson(rawText, options, sheetIds, effectiveModel, "lmstudio");
+      } catch (err) {
+        return makeFailedTakeoffRun(options, String(err), sheetIds, "lmstudio");
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // DeepSeek path — OpenAI-compatible, text-only (no vision)
+    // ---------------------------------------------------------------------------
+    if (provider === "deepseek") {
+      const deepseekUrl = (config.baseUrl || "https://api.deepseek.com/v1").replace(/\/+$/, "") + "/chat/completions";
+      const deepseekModel = model || config.deepseekModel || "deepseek-chat";
+      if (typeof options.onProgress === "function") options.onProgress("Building prompt", 20);
+      const promptText = buildPaintingTakeoffPromptText(options, sheetIds[0] || "unknown");
+      if (typeof options.onProgress === "function") options.onProgress("Waiting for DeepSeek response", 40);
+      let rawText;
+      try {
+        rawText = await callLmStudioChatCompletion(
+          deepseekUrl, apiKey, deepseekModel,
+          [{ role: "user", content: promptText }],
+          maxTokens
+        );
+      } catch (err) {
+        return makeFailedTakeoffRun(options, String(err), sheetIds, "deepseek");
+      }
+      if (typeof options.onProgress === "function") options.onProgress("Parsing results", 85);
+      try {
+        return parseTakeoffJson(rawText, options, sheetIds, deepseekModel, "deepseek");
+      } catch (err) {
+        return makeFailedTakeoffRun(options, String(err), sheetIds, "deepseek");
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // OpenAI and Anthropic paths — support images and PDFs
+    // ---------------------------------------------------------------------------
+    if (typeof options.onProgress === "function") options.onProgress("Loading drawing", 15);
+
+    const sheetId = sheetIds[0] || null;
+    let fileBlob = null;
+    let imageDataUrl = null;
+    let pdfBase64 = null;
+
+    if (sheetId) {
+      try {
+        const db = await openTakeoffDb();
+        fileBlob = await getTakeoffFile(db, sheetId);
+        if (fileBlob instanceof Blob) {
+          const isPdfFile = fileBlob.type === "application/pdf" || (fileBlob.name || "").toLowerCase().endsWith(".pdf");
+          if (isPdfFile) {
+            // Anthropic supports PDFs natively via base64 document type.
+            // OpenAI Chat Completions does not — PDFs are sent as text-only for OpenAI.
+            if (provider === "anthropic") {
+              pdfBase64 = (await blobToDataUrl(fileBlob)).split(",")[1] || "";
+            }
+          } else if (isImageBlob(fileBlob)) {
+            imageDataUrl = await blobToDataUrl(fileBlob);
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (typeof options.onProgress === "function") options.onProgress("Running AI analysis", 30);
+
+    const promptText = buildPaintingTakeoffPromptText(options, sheetId || "unknown");
+    const effectiveModel = model || (provider === "openai" ? "gpt-4o" : "claude-3-5-sonnet-latest");
+
+    if (typeof options.onProgress === "function") options.onProgress("Waiting for AI response", 50);
+
+    let rawText;
+    try {
+      if (provider === "openai") {
+        const messages = imageDataUrl
+          ? [{ role: "user", content: [
+              { type: "text", text: promptText },
+              { type: "image_url", image_url: { url: imageDataUrl } },
+            ] }]
+          : [{ role: "user", content: promptText }];
+        rawText = await callOpenAiChatCompletion(apiKey, effectiveModel, messages, maxTokens);
+      } else {
+        // Anthropic — supports image, PDF (base64 document), or text-only
+        let content;
+        if (pdfBase64) {
+          content = [
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } },
+            { type: "text", text: promptText },
+          ];
+        } else if (imageDataUrl) {
+          content = [
+            { type: "image", source: { type: "base64", media_type: imageDataUrl.split(";")[0].split(":")[1] || "image/png", data: imageDataUrl.split(",")[1] || "" } },
+            { type: "text", text: promptText },
+          ];
+        } else {
+          content = [{ type: "text", text: promptText }];
+        }
+        rawText = await callAnthropicMessages(apiKey, effectiveModel, [{ role: "user", content }], maxTokens);
+      }
+    } catch (err) {
+      return makeFailedTakeoffRun(options, String(err), sheetIds, provider);
+    }
+
+    if (typeof options.onProgress === "function") options.onProgress("Parsing results", 85);
+    try {
+      return parseTakeoffJson(rawText, options, sheetIds, effectiveModel, provider);
+    } catch (err) {
+      return makeFailedTakeoffRun(options, String(err), sheetIds, provider);
+    }
   }
 
   function mockMeasurementsForSheet({ projectId, sheetId, focus, createdAt, sheetIndex }) {

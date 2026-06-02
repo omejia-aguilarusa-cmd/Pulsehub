@@ -25,8 +25,20 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Environment / secrets — never commit
+.env
+.env.local
+.env.*.local
+
 # Runtime logs
 *.log
+
+# Test output artifacts
+test_output*.txt
+test_full.txt
+test_no_phase0.txt
+fail_output.txt
+output/
 
 # Real or generated project data
 *.tiff

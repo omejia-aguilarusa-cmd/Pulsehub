@@ -52,6 +52,12 @@
     userEmail: "",
     reduceMotion: false,
     aiTakeoffEnabled: true,
+    // AI provider override — when non-empty these override the .env values
+    // injected by the Python host at startup via window.TAKEOFF_AI_CONFIG.
+    aiProviderOverride: "",
+    aiApiKeyOverride: "",
+    aiModelOverride: "",
+    aiBaseUrlOverride: "",
   });
 
   function nowIso() {

@@ -120,6 +120,9 @@
       if (activeProject) {
         statefulUi.selectedDrawingId = state.settings.activeDrawingIdByProject[activeProject.id] || null;
       }
+      // Apply any in-app AI provider overrides saved from the settings page so
+      // the AI engine uses the correct credentials without requiring a restart.
+      applyAiProviderOverrides();
       syncDerivedRisks();
       render();
     } catch (error) {
@@ -127,6 +130,18 @@
       statefulUi.loaded = true;
       render();
     }
+  }
+
+  function applyAiProviderOverrides() {
+    if (typeof window.TAKEOFF_AI_CONFIG !== "object" || !window.TAKEOFF_AI_CONFIG) return;
+    const s = state.settings;
+    if (s.aiProviderOverride) window.TAKEOFF_AI_CONFIG.provider = s.aiProviderOverride;
+    if (s.aiApiKeyOverride) window.TAKEOFF_AI_CONFIG.apiKey = s.aiApiKeyOverride;
+    if (s.aiModelOverride) {
+      window.TAKEOFF_AI_CONFIG.takeoffModel = s.aiModelOverride;
+      window.TAKEOFF_AI_CONFIG.chatModel = s.aiModelOverride;
+    }
+    if (s.aiBaseUrlOverride) window.TAKEOFF_AI_CONFIG.baseUrl = s.aiBaseUrlOverride;
   }
 
   async function openDb() {
@@ -204,6 +219,27 @@
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("change", handleChange);
   document.addEventListener("input", handleInput);
+
+  // Drag-and-drop upload on the Documents drop zone.
+  document.addEventListener("dragover", (e) => {
+    const zone = e.target.closest("#doc-drop-zone");
+    if (!zone) return;
+    e.preventDefault();
+    zone.classList.add("drop-zone--active");
+  });
+  document.addEventListener("dragleave", (e) => {
+    const zone = e.target.closest("#doc-drop-zone");
+    if (!zone) return;
+    if (!zone.contains(e.relatedTarget)) zone.classList.remove("drop-zone--active");
+  });
+  document.addEventListener("drop", async (e) => {
+    const zone = e.target.closest("#doc-drop-zone");
+    if (!zone) return;
+    e.preventDefault();
+    zone.classList.remove("drop-zone--active");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) await uploadDocuments(files);
+  });
   document.addEventListener("keydown", handleKeyboardShortcuts);
 
   function render() {
@@ -402,14 +438,112 @@
     `;
   }
 
+  function drawingAiStatus(drawing) {
+    // Check if this drawing is currently being analyzed.
+    const processing = statefulUi.aiProcessingState;
+    if (processing && processing.status === "processing") {
+      const sheetStatus = (processing.sheetStatuses || []).find((s) => s.sheetId === drawing.id);
+      if (sheetStatus) {
+        const stage = statefulUi.aiTakeoffStage || "Analyzing";
+        return { label: `${stage}…`, cls: "info", spinning: true };
+      }
+    }
+    if (drawing.processingStatus === "uploading") return { label: "Uploading…", cls: "info", spinning: true };
+
+    const run = state.aiTakeoffRuns
+      .filter((r) => r.projectId === drawing.projectId && (r.pageIds || []).includes(drawing.id))
+      .sort((a, b) => (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || ""))[0] || null;
+    if (!run) return { label: "Not reviewed", cls: "" };
+    if (run.status === "complete") return { label: "Reviewed", cls: "ok" };
+    if (run.status === "processing") return { label: "Processing", cls: "warn" };
+    if (run.status === "not_configured") return { label: "AI not configured", cls: "" };
+    if (run.status === "failed") return { label: "Review failed", cls: "risk" };
+    return { label: titleCase(run.status || ""), cls: "" };
+  }
+
   function renderDocuments(project) {
     const drawings = filterByProject(state.drawings, project.id);
+    const isUploading = statefulUi.aiProcessingState?.status === "processing";
     return `
       <div class="page">
-        ${renderPageHeader("Documents", "Upload, rename, delete, and open real project files.", `<button class="button primary" data-action="trigger-document-upload">Upload files</button><input id="document-upload" type="file" multiple accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.tif,.tiff" hidden>`)}
+        ${renderPageHeader(
+          "Documents",
+          "Upload drawings and plan files. AI analysis runs automatically after upload.",
+          `<button class="button primary" data-action="trigger-document-upload">Upload files</button>
+           <input id="document-upload" type="file" multiple accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.tif,.tiff" hidden>`
+        )}
+
+        <div class="drop-zone ${isUploading ? "drop-zone--busy" : ""}"
+             data-action="trigger-document-upload"
+             id="doc-drop-zone"
+             role="button"
+             tabindex="0"
+             aria-label="Drop files here or click to upload">
+          <div class="drop-zone__inner">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            ${isUploading
+              ? `<p><strong>AI analysis running…</strong> New uploads will be queued.</p>`
+              : `<p><strong>Drop PDF or image files here</strong> — or click Upload files above</p>
+                 <p style="font-size:0.8rem;color:var(--muted)">Supported: PDF, PNG, JPG, TIFF · Max 200 MB per file</p>`
+            }
+          </div>
+        </div>
+
         <section class="panel">
-          <div class="panel-header"><div><h2>Document register</h2><p>${drawings.length ? `${drawings.length} saved file${drawings.length === 1 ? "" : "s"}` : "No documents uploaded"}</p></div></div>
-          ${drawings.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Uploaded</th><th>Actions</th></tr></thead><tbody>${drawings.map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.mimeType || item.extension || "Unknown")}</td><td>${formatBytes(item.size)}</td><td>${formatDate(item.uploadedAt)}</td><td><div class="inline-actions"><button class="button ghost" data-action="preview-document" data-id="${item.id}" aria-label="Preview ${escapeAttribute(item.name)}">Preview</button><button class="button ghost" data-action="open-document" data-id="${item.id}" aria-label="Open ${escapeAttribute(item.name)}">Open</button><button class="button ghost" data-action="rename-document" data-id="${item.id}" aria-label="Rename ${escapeAttribute(item.name)}">Rename</button><button class="button ghost" data-action="delete-document" data-id="${item.id}" aria-label="Delete ${escapeAttribute(item.name)}">Delete</button></div></td></tr>`).join("")}</tbody></table></div>` : `<div class="panel-body">${renderInlineEmpty("No documents yet.", "Upload drawings or project documents to populate the register.", `<button class="button primary" data-action="trigger-document-upload">Upload files</button>`)}</div>`}
+          <div class="panel-header">
+            <div>
+              <h2>Document register</h2>
+              <p>${drawings.length ? `${drawings.length} file${drawings.length === 1 ? "" : "s"} · AI analysis runs automatically on upload` : "No documents uploaded yet"}</p>
+            </div>
+          </div>
+          ${drawings.length
+            ? `<div class="table-wrap"><table>
+                <thead>
+                  <tr>
+                    <th>File name</th>
+                    <th>Type</th>
+                    <th>Size</th>
+                    <th>Uploaded</th>
+                    <th>AI status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${drawings.map((item) => {
+                    const ai = drawingAiStatus(item);
+                    const isThisProcessing = ai.spinning;
+                    return `<tr class="${isThisProcessing ? "row--processing" : ""}">
+                      <td>
+                        <strong>${escapeHtml(item.name)}</strong>
+                        ${isThisProcessing ? `<span class="spinner" aria-label="Processing" style="margin-left:6px"></span>` : ""}
+                      </td>
+                      <td>${escapeHtml((item.extension || "").toUpperCase() || item.mimeType || "—")}</td>
+                      <td>${formatBytes(item.size)}</td>
+                      <td>${formatDate(item.uploadedAt)}</td>
+                      <td>
+                        <span class="tag ${ai.cls}">
+                          ${isThisProcessing ? `<span class="spinner spinner--small" aria-hidden="true"></span> ` : ""}
+                          ${escapeHtml(ai.label)}
+                        </span>
+                      </td>
+                      <td>
+                        <div class="inline-actions">
+                          <button class="button ghost" data-action="preview-document" data-id="${item.id}">Preview</button>
+                          <button class="button ghost" data-action="open-document" data-id="${item.id}">Open</button>
+                          <button class="button ghost" data-action="rename-document" data-id="${item.id}">Rename</button>
+                          <button class="button ghost" data-action="reprocess-document" data-id="${item.id}" ${isThisProcessing ? "disabled" : ""}>Reprocess</button>
+                          <button class="button ghost" data-action="delete-document" data-id="${item.id}" ${isThisProcessing ? "disabled" : ""}>Delete</button>
+                        </div>
+                      </td>
+                    </tr>`;
+                  }).join("")}
+                </tbody>
+               </table></div>`
+            : `<div class="panel-body">${renderInlineEmpty(
+                "No documents yet.",
+                "Drop files onto the zone above or click Upload files to get started.",
+                `<button class="button primary" data-action="trigger-document-upload">Upload files</button>`
+              )}</div>`}
         </section>
       </div>
     `;
@@ -909,27 +1043,70 @@
   function renderAiQuantitiesPanel(project, run) {
     const totals = run ? (run.totals || calculateAiTakeoffTotals(run)) : null;
     const rooms = run ? aiTakeoffRooms(run) : [];
+    const drywallAssemblies = run ? (run.pages || []).flatMap((page) => (page.drywallAssemblies || []).map((a) => ({ ...a, pageId: a.pageId || page.pageId }))) : [];
     const warnings = run ? [...(run.warnings || []), ...(run.pages || []).flatMap((page) => page.warnings || [])] : [];
+    const runLabel = run ? `${escapeHtml(run.provider || “ai”)} · ${titleCase(run.status || “unknown”)} · ${formatDateTime(run.updatedAt || run.createdAt)}` : “No AI takeoff run yet”;
     return `
-      <section class="panel quantities-panel">
-        <div class="panel-header">
-          <div><h2>AI painting quantities</h2><p>${run ? `${titleCase(run.status || "unknown")} - ${formatDateTime(run.updatedAt || run.createdAt)}` : "No AI takeoff run yet"}</p></div>
-          <div class="inline-actions">
-            <button class="button" data-action="run-ai-takeoff">Run AI Takeoff</button>
-            <button class="button" data-action="export-ai-takeoff-csv" ${run ? "" : "disabled"}>Export AI CSV</button>
+      <section class=”panel quantities-panel”>
+        <div class=”panel-header”>
+          <div><h2>AI drywall + paint quantities</h2><p>${runLabel}</p></div>
+          <div class=”inline-actions”>
+            <button class=”button” data-action=”run-ai-takeoff”>Run AI Takeoff</button>
+            <button class=”button” data-action=”export-ai-takeoff-csv” ${run ? “” : “disabled”}>Export CSV</button>
           </div>
         </div>
-        <div class="panel-body stack">
-          ${run ? `<div class="summary-grid">
-            ${metricMini("Wall SF", formatNumber(totals.wallSf))}
-            ${metricMini("Ceiling SF", formatNumber(totals.ceilingSf))}
-            ${metricMini("Doors", formatNumber(totals.doorCount))}
-            ${metricMini("Windows", formatNumber(totals.windowCount))}
-            ${metricMini("Trim LF", formatNumber(totals.trimLf))}
-            ${metricMini("Confidence", run.confidenceScore ? `${formatNumber(run.confidenceScore)}%` : "Unavailable")}
+        <div class=”panel-body stack”>
+          ${run ? `
+          <div class=”summary-grid”>
+            ${metricMini(“Wall SF (paint)”, formatNumber(totals.wallSf))}
+            ${metricMini(“Ceiling SF”, formatNumber(totals.ceilingSf))}
+            ${metricMini(“Trim LF”, formatNumber(totals.trimLf))}
+            ${metricMini(“Drywall SF (GWB)”, formatNumber(totals.gwbSf || 0))}
+            ${metricMini(“Stud framing LF”, formatNumber(totals.metalStudLf || 0))}
+            ${metricMini(“Corner bead LF”, formatNumber(totals.cornerBeadLf || 0))}
+            ${metricMini(“Doors”, formatNumber(totals.doorCount))}
+            ${metricMini(“Windows”, formatNumber(totals.windowCount))}
+            ${metricMini(“Confidence”, run.confidenceScore ? `${formatNumber(run.confidenceScore)}%` : “—“)}
           </div>
-          ${warnings.length ? `<div class="notice warn">${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}
-          ${rooms.length ? `<div class="table-wrap"><table><thead><tr><th>Room</th><th>Page</th><th>Wall SF</th><th>Ceiling SF</th><th>Doors</th><th>Windows</th><th>Trim LF</th><th>Confidence</th><th>Assumptions</th></tr></thead><tbody>${rooms.map((room) => `<tr><td>${escapeHtml(room.name)}</td><td>${escapeHtml(entityName(state.drawings, room.pageId) || room.pageId || "â€”")}</td><td>${formatNumber(room.wallSf)}</td><td>${formatNumber(room.ceilingSf)}</td><td>${formatNumber(room.doorCount)}</td><td>${formatNumber(room.windowCount)}</td><td>${formatNumber(room.trimLf)}</td><td>${renderConfidence(room.confidence)}</td><td>${escapeHtml((room.assumptions || []).join("; ") || "None recorded")}</td></tr>`).join("")}</tbody></table></div>` : renderInlineEmpty("No AI rooms available.", run.status === "not_configured" ? "Configure an AI provider to extract room-by-room quantities from plan images. Manual takeoff remains available." : "The latest AI run returned no rooms for review.")}` : renderInlineEmpty("No AI takeoff run yet.", "Run AI Takeoff from the drawing viewer or this panel to create a painting-specific review result.", `<button class="button primary" data-action="run-ai-takeoff">Run AI Takeoff</button>`)}
+          ${warnings.length ? `<div class=”notice warn”>${warnings.map((w) => `<p>${escapeHtml(w)}</p>`).join(“”)}</div>` : “”}
+
+          <h3 style=”font-size:0.9rem;font-weight:600;margin:0”>Paint scope — by room</h3>
+          ${rooms.length
+            ? `<div class=”table-wrap”><table>
+                <thead><tr><th>Room</th><th>Wall SF</th><th>Ceiling SF</th><th>Doors</th><th>Windows</th><th>Trim LF</th><th>Finish</th><th>Confidence</th><th>Actions</th></tr></thead>
+                <tbody>${rooms.map((room) => `<tr>
+                  <td><strong>${escapeHtml(room.name)}</strong><br><small>${escapeHtml(room.locationDescription || “”)}</small></td>
+                  <td>${formatNumber(room.wallSf)}</td>
+                  <td>${formatNumber(room.ceilingSf)}</td>
+                  <td>${formatNumber(room.doorCount)}</td>
+                  <td>${formatNumber(room.windowCount)}</td>
+                  <td>${formatNumber(room.trimLf)}</td>
+                  <td>${escapeHtml(room.paintFinish || “—“)}</td>
+                  <td>${renderConfidence(room.confidence)}</td>
+                  <td><button class=”button ghost” data-action=”edit-ai-room” data-run-id=”${run.id}” data-room-id=”${room.id}”>Edit</button></td>
+                </tr>`).join(“”)}</tbody>
+               </table></div>`
+            : renderInlineEmpty(“No rooms detected.”, run.status === “not_configured” ? “Configure an AI provider in Settings.” : “The AI run returned no rooms — re-run or check the drawing.”)}
+
+          <h3 style=”font-size:0.9rem;font-weight:600;margin:0”>Drywall scope — wall assemblies</h3>
+          ${drywallAssemblies.length
+            ? `<div class=”table-wrap”><table>
+                <thead><tr><th>Wall type</th><th>Length LF</th><th>Height FT</th><th>Area SF</th><th>GWB layers</th><th>Stud</th><th>Fire rating</th><th>STC</th><th>Confidence</th><th>Actions</th></tr></thead>
+                <tbody>${drywallAssemblies.map((asm) => `<tr>
+                  <td><strong>${escapeHtml(asm.wallType)}</strong><br><small>${escapeHtml(asm.locationDescription || “”)}</small></td>
+                  <td>${formatNumber(asm.lengthLf)}</td>
+                  <td>${formatNumber(asm.heightFt)}</td>
+                  <td>${formatNumber(asm.areaSf)}</td>
+                  <td>${escapeHtml(String(asm.gwbLayers || 1))}</td>
+                  <td>${escapeHtml([asm.studSize, asm.studSpacing].filter(Boolean).join(“ “) || “—“)}</td>
+                  <td>${escapeHtml(asm.fireRating || “—“)}</td>
+                  <td>${escapeHtml(asm.soundRating || “—“)}</td>
+                  <td>${renderConfidence(asm.confidence)}</td>
+                  <td><button class=”button ghost” data-action=”edit-ai-assembly” data-run-id=”${run.id}” data-asm-id=”${asm.id}”>Edit</button></td>
+                </tr>`).join(“”)}</tbody>
+               </table></div>`
+            : renderInlineEmpty(“No drywall assemblies detected.”, “The AI did not detect wall-type data on this sheet. Check that the drawing contains wall schedule or partition plan information.”)}`
+          : renderInlineEmpty(“No AI takeoff run yet.”, “Upload a drawing and AI analysis runs automatically, or click Run AI Takeoff.”, `<button class=”button primary” data-action=”run-ai-takeoff”>Run AI Takeoff</button>`)}
         </div>
       </section>
     `;
@@ -937,10 +1114,31 @@
 
   function renderScopeDetection(project) {
     const rows = filterByProject(state.scopeDetections, project.id);
+    const latestRun = latestAiTakeoffRun(project.id);
+    const aiAssemblies = latestRun ? (latestRun.pages || []).flatMap((p) => (p.drywallAssemblies || []).map((a) => ({ ...a, runId: latestRun.id, pageId: a.pageId || p.pageId }))) : [];
     return `
       <div class="page">
-        ${renderPageHeader("Scope detection", "Manual review workflow for detected scope items when no automated service is connected.", `<button class="button primary" data-action="open-scope-modal">New scope item</button>`)}
-        <div class="notice">Automatic AI scope detection is not integrated in this build. This page uses a real manual review workflow instead of simulating AI activity.</div>
+        ${renderPageHeader("Scope detection", "AI-detected drywall assemblies and manual review items.", `<button class="button primary" data-action="open-scope-modal">New scope item</button><button class="button" data-action="run-ai-takeoff">Re-run AI</button>`)}
+        ${aiAssemblies.length ? `
+        <section class="panel">
+          <div class="panel-header"><div><h2>AI-detected drywall assemblies</h2><p>${aiAssemblies.length} wall type${aiAssemblies.length === 1 ? "" : "s"} from latest AI run</p></div></div>
+          <div class="panel-body">
+            <div class="table-wrap"><table>
+              <thead><tr><th>Wall type</th><th>Length LF</th><th>Area SF</th><th>Stud</th><th>Fire</th><th>STC</th><th>Confidence</th><th>Actions</th></tr></thead>
+              <tbody>${aiAssemblies.map((asm) => `<tr>
+                <td><strong>${escapeHtml(asm.wallType)}</strong><br><small>${escapeHtml(asm.locationDescription || "")}</small></td>
+                <td>${formatNumber(asm.lengthLf)}</td>
+                <td>${formatNumber(asm.areaSf)}</td>
+                <td>${escapeHtml([asm.studSize, asm.studSpacing].filter(Boolean).join(" ") || "—")}</td>
+                <td>${escapeHtml(asm.fireRating || "—")}</td>
+                <td>${escapeHtml(asm.soundRating || "—")}</td>
+                <td>${renderConfidence(asm.confidence)}</td>
+                <td><button class="button ghost" data-action="edit-ai-assembly" data-run-id="${asm.runId}" data-asm-id="${asm.id}">Edit</button></td>
+              </tr>`).join("")}</tbody>
+            </table></div>
+          </div>
+        </section>` : ""}
+        ${!aiAssemblies.length ? `<div class="notice">Upload a drawing to auto-detect drywall assemblies, or run AI Takeoff manually.</div>` : ""}
         <section class="panel">
           <div class="panel-header"><div><h2>Review queue</h2><p>${rows.length ? `${rows.length} item${rows.length === 1 ? "" : "s"}` : "No scope items yet"}</p></div></div>
           <div class="panel-body">
@@ -1061,6 +1259,107 @@
     `;
   }
 
+  function renderAiProviderStatus() {
+    const cfg = typeof window.TAKEOFF_AI_CONFIG === "object" && window.TAKEOFF_AI_CONFIG
+      ? window.TAKEOFF_AI_CONFIG : null;
+    const envProvider = cfg ? (cfg.provider || "none") : "none";
+    const envKey = cfg ? (cfg.apiKey || "") : "";
+    const deepseekKeyConfigured = cfg ? Boolean(cfg.deepseekKeyConfigured) : false;
+    const override = state.settings.aiProviderOverride || "";
+    const activeProvider = override || envProvider;
+    const keyConfigured = Boolean(override ? state.settings.aiApiKeyOverride : envKey);
+    const isReady = keyConfigured || activeProvider === "lmstudio";
+
+    // Cascade status: Codex OAuth → DeepSeek → LM Studio
+    const codexReady = activeProvider === "openai" && keyConfigured;
+    const deepseekReady = activeProvider === "deepseek" && keyConfigured;
+    const deepseekBackupReady = deepseekKeyConfigured && activeProvider !== "deepseek";
+
+    let statusLabel, statusCls;
+    if (!activeProvider || activeProvider === "none") {
+      statusLabel = "Not configured";
+      statusCls = "risk";
+    } else if (isReady) {
+      statusLabel = `${activeProvider} — ready`;
+      statusCls = "ok";
+    } else {
+      statusLabel = `${activeProvider} — API key missing`;
+      statusCls = "risk";
+    }
+
+    const openaiReady  = Boolean(cfg && cfg.apiKey && (envProvider === "openai" || override === "openai"));
+    const deepseekCfg  = cfg ? Boolean(cfg.deepseekKeyConfigured) : false;
+    const lmstudioReady = activeProvider === "lmstudio";
+
+    const cascadeRows = [
+      {
+        label: "1. DeepSeek",
+        badge: "Primary",
+        ready: deepseekCfg || (activeProvider === "deepseek" && keyConfigured),
+        note: (deepseekCfg || (activeProvider === "deepseek" && keyConfigured))
+          ? "Key configured — active primary provider"
+          : "DEEPSEEK_API_KEY not set — add to .env or enter key below",
+      },
+      {
+        label: "2. OpenAI",
+        badge: "Secondary",
+        ready: openaiReady || (activeProvider === "openai" && keyConfigured),
+        note: (openaiReady || (activeProvider === "openai" && keyConfigured))
+          ? "Key set — activates automatically if DeepSeek fails"
+          : "OPENAI_API_KEY not set — add to .env when you have a key",
+      },
+      {
+        label: "3. LM Studio",
+        badge: "Last resort",
+        ready: lmstudioReady,
+        note: "Local — no key needed; activates only if both cloud providers fail",
+      },
+    ].map((row) =>
+      `<tr>
+        <td><strong>${escapeHtml(row.label)}</strong> <span class="tag" style="font-size:0.72rem">${escapeHtml(row.badge)}</span></td>
+        <td><span class="tag ${row.ready ? "ok" : ""}">${row.ready ? "Ready" : "Not configured"}</span></td>
+        <td style="font-size:0.82rem;color:var(--muted)">${escapeHtml(row.note)}</td>
+      </tr>`
+    ).join("");
+
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>AI provider</h2>
+            <p>Fixed cascade — DeepSeek is the primary provider. OpenAI activates if DeepSeek fails. LM Studio is the last resort.</p>
+          </div>
+        </div>
+        <div class="panel-body stack">
+          <div class="notice">
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr style="text-align:left;font-size:0.78rem;color:var(--muted);border-bottom:1px solid var(--border)"><th style="padding-bottom:4px">Provider</th><th style="padding-bottom:4px">Status</th><th style="padding-bottom:4px">Note</th></tr></thead>
+              <tbody>${cascadeRows}</tbody>
+            </table>
+            <p style="margin-top:10px;font-size:0.8rem;color:var(--muted)">
+              <strong>Note:</strong> OpenAI Codex OAuth / ChatGPT sign-in is not available for desktop apps — an API key is required.
+              DeepSeek does not support image input; PDF text extraction is used instead when DeepSeek handles a request.
+              The cascade order is fixed in code and cannot be changed here.
+            </p>
+          </div>
+          <form class="form-grid" data-form="ai-provider">
+            <div class="field-note">
+              <p><strong>To activate OpenAI (primary):</strong> add <code>OPENAI_API_KEY=sk-…</code> to your <code>.env</code> file, or enter the key in the field below and save.</p>
+              <p><strong>DeepSeek backup key</strong> is already set in your <code>.env</code> file and requires no action here.</p>
+            </div>
+            ${field("OpenAI API key override", "aiApiKeyOverride", state.settings.aiApiKeyOverride, "password")}
+            ${field("Model override (optional)", "aiModelOverride", state.settings.aiModelOverride)}
+            ${field("Base URL override (LM Studio only)", "aiBaseUrlOverride", state.settings.aiBaseUrlOverride)}
+            <div class="field-note">
+              <p>Keys entered here are stored only in this browser's local database (IndexedDB). They are not synced or committed. Leave blank to use <code>.env</code> values.</p>
+            </div>
+            <div><button class="button primary" type="submit">Save AI settings</button></div>
+          </form>
+        </div>
+      </section>
+    `;
+  }
+
   function renderSettings() {
     return `
       <div class="page">
@@ -1083,6 +1382,7 @@
           </div>
           <div class="modal-footer"><button class="button primary" type="submit">Save settings</button></div>
         </form>
+        ${renderAiProviderStatus()}
         <section class="panel"><div class="panel-header"><div><h2>Data controls</h2><p>Export or clear the local workspace database.</p></div></div><div class="panel-body inline-actions"><button class="button" data-action="export-workspace">Export all data</button><button class="button danger" data-action="clear-workspace">Clear local data</button></div></section>
       </div>
     `;
@@ -1132,6 +1432,8 @@
       case "aiMeasurement": return modalShell("Run AI measurement", renderAiMeasurementForm(project), statefulUi.aiProcessingState?.status === "processing" ? "Processing..." : "Run AI", "ai-measurement", statefulUi.aiProcessingState?.status === "processing");
       case "scaleCalibration": return modalShell("Scale & Calibration", renderScaleCalibrationForm(project, payload), "Save scale", "scale-calibration");
       case "drawingMeasurementEdit": return modalShell("Edit drawing measurement", renderDrawingMeasurementEditForm(payload), "Save measurement", "drawing-measurement-edit");
+      case "aiRoom": return modalShell("Edit AI room", renderAiRoomEditForm(payload), "Save room", "ai-room");
+      case "aiAssembly": return modalShell("Edit drywall assembly", renderAiAssemblyEditForm(payload), "Save assembly", "ai-assembly");
       case "export": return renderExportModal(project);
       default: return "";
     }
@@ -1235,6 +1537,38 @@
         { value: "pushed_to_takeoff", label: "Pushed to Takeoff" },
       ])}
       ${field("Notes", "notes", current.notes || "", "text", false, true)}
+    </div>`;
+  }
+
+  function renderAiRoomEditForm(room) {
+    return `<input type="hidden" name="runId" value="${escapeAttribute(room.runId || "")}">
+    <input type="hidden" name="roomId" value="${escapeAttribute(room.roomId || room.id || "")}">
+    <div class="form-grid">
+      ${field("Room name", "name", room.name || "", "text", true)}
+      ${field("Wall SF", "wallSf", room.wallSf ?? "", "number")}
+      ${field("Ceiling SF", "ceilingSf", room.ceilingSf ?? "", "number")}
+      ${field("Door count", "doorCount", room.doorCount ?? 0, "number")}
+      ${field("Window count", "windowCount", room.windowCount ?? 0, "number")}
+      ${field("Trim LF", "trimLf", room.trimLf ?? "", "number")}
+      ${field("Paint finish / system", "paintFinish", room.paintFinish || "")}
+      ${field("Confidence %", "confidence", room.confidence ?? 0, "number")}
+    </div>`;
+  }
+
+  function renderAiAssemblyEditForm(asm) {
+    return `<input type="hidden" name="runId" value="${escapeAttribute(asm.runId || "")}">
+    <input type="hidden" name="asmId" value="${escapeAttribute(asm.asmId || asm.id || "")}">
+    <div class="form-grid">
+      ${field("Wall type ID", "wallType", asm.wallType || "", "text", true)}
+      ${field("Length LF", "lengthLf", asm.lengthLf ?? "", "number")}
+      ${field("Height FT", "heightFt", asm.heightFt ?? "", "number")}
+      ${field("Area SF", "areaSf", asm.areaSf ?? "", "number")}
+      ${field("GWB layers", "gwbLayers", asm.gwbLayers ?? 1, "number")}
+      ${field("Stud size", "studSize", asm.studSize || "")}
+      ${field("Stud spacing", "studSpacing", asm.studSpacing || "")}
+      ${field("Fire rating", "fireRating", asm.fireRating || "")}
+      ${field("Sound rating (STC)", "soundRating", asm.soundRating || "")}
+      ${field("Confidence %", "confidence", asm.confidence ?? 0, "number")}
     </div>`;
   }
 
@@ -1374,6 +1708,7 @@
       case "preview-document": selectDrawingAndRoute(id, "drawing-viewer"); return;
       case "open-document": await openDocument(id); return;
       case "rename-document": openRenameDocument(id); return;
+      case "reprocess-document": await reprocessDocument(id); return;
       case "delete-document": await deleteDocument(id); return;
       case "select-drawing": await selectDrawing(id); return;
       case "viewer-prev-page": changeViewerPage(id, -1); return;
@@ -1388,6 +1723,8 @@
       case "open-ai-measurement-modal": openModal("aiMeasurement"); return;
       case "run-ai-takeoff": await runAiTakeoff(); return;
       case "export-ai-takeoff-csv": await exportAiTakeoffCsv(); return;
+      case "edit-ai-room": openEditAiRoom(target.dataset.runId, target.dataset.roomId); return;
+      case "edit-ai-assembly": openEditAiAssembly(target.dataset.runId, target.dataset.asmId); return;
       case "open-scale-modal": openScaleModal(); return;
       case "add-sample-manual-measurement": await addSampleManualMeasurement(); return;
       case "select-measurement": selectMeasurement(id); return;
@@ -1471,12 +1808,15 @@
       case "ai-measurement": await submitAiMeasurement(data); return;
       case "scale-calibration": await submitScaleCalibration(data); return;
       case "drawing-measurement-edit": await submitDrawingMeasurementEdit(data); return;
+      case "ai-room": await submitAiRoomEdit(data); return;
+      case "ai-assembly": await submitAiAssemblyEdit(data); return;
       case "scope": await submitScope(data); return;
       case "rfi": await submitRfi(data); return;
       case "estimate": await submitEstimate(data); return;
       case "risk": await submitRisk(data); return;
       case "memory": await submitMemory(data); return;
       case "settings": await submitSettings(data); return;
+      case "ai-provider": await submitAiProviderSettings(data); return;
       default: return;
     }
   }
@@ -1577,33 +1917,84 @@
 
   async function uploadDocuments(fileList) {
     const project = getActiveProject();
-    if (!project || !fileList || !fileList.length) return;
+    if (!project) { pushToast(“Create or select a project before uploading files.”); render(); return; }
+    if (!fileList || !fileList.length) return;
+
+    const MAX_BYTES = 200 * 1024 * 1024; // 200 MB
+    const ALLOWED_EXTENSIONS = new Set([“pdf”, “png”, “jpg”, “jpeg”, “tif”, “tiff”]);
+    const existingNames = new Set(filterByProject(state.drawings, project.id).map((d) => d.fileName || d.name));
+
+    const accepted = [];
+    const rejected = [];
+
+    for (const file of Array.from(fileList)) {
+      const ext = file.name.includes(“.”) ? file.name.split(“.”).pop().toLowerCase() : “”;
+      if (!ALLOWED_EXTENSIONS.has(ext)) {
+        rejected.push(`”${file.name}” — unsupported type (.${ext || “unknown”}). Use PDF or image files.`);
+        continue;
+      }
+      if (file.size > MAX_BYTES) {
+        rejected.push(`”${file.name}” — file is too large (${formatBytes(file.size)}, max 200 MB).`);
+        continue;
+      }
+      if (existingNames.has(file.name)) {
+        if (!window.confirm(`”${file.name}” is already in this project.\n\nUpload again as a new copy?`)) continue;
+      }
+      accepted.push(file);
+    }
+
+    if (rejected.length) {
+      pushToast(`${rejected.length} file${rejected.length === 1 ? “” : “s”} skipped:\n${rejected.join(“\n”)}`);
+      render();
+    }
+    if (!accepted.length) return;
+
     const db = await openDb();
-    const files = Array.from(fileList);
-    for (const file of files) {
+    const newDrawings = [];
+
+    for (const file of accepted) {
+      const ext = file.name.includes(“.”) ? file.name.split(“.”).pop().toLowerCase() : “”;
+      const mimeType = file.type || inferMimeType(file.name);
       const drawing = {
-        id: createId("drawing"),
+        id: createId(“drawing”),
         projectId: project.id,
         name: file.name,
         fileName: file.name,
-        mimeType: file.type || inferMimeType(file.name),
-        extension: file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "",
+        mimeType,
+        extension: ext,
         size: file.size,
         pageCount: null,
-        processingStatus: isPdf({ mimeType: file.type || inferMimeType(file.name), extension: file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "" }) ? "stored_pdf_pending_native_processing" : "stored",
+        processingStatus: “uploading”,
         pageImages: [],
         uploadedAt: nowIso(),
         createdAt: nowIso(),
         updatedAt: nowIso(),
       };
       state.drawings.push(drawing);
-      await dbSet(db, "files", drawing.id, file);
+      newDrawings.push(drawing);
+      try {
+        await dbSet(db, “files”, drawing.id, file);
+        drawing.processingStatus = isPdf(drawing) ? “stored_pdf_pending_ai” : “stored”;
+      } catch (err) {
+        drawing.processingStatus = “upload_failed”;
+        pushToast(`Failed to store “${file.name}”: ${err && err.message ? err.message : String(err)}`);
+      }
       if (!state.settings.activeDrawingIdByProject[project.id]) {
         state.settings.activeDrawingIdByProject[project.id] = drawing.id;
       }
-      addActivity(state, project.id, "document.uploaded", `Uploaded document “${drawing.name}”.`);
+      addActivity(state, project.id, “document.uploaded”, `Uploaded “${drawing.name}”.`);
     }
-    await saveAndRender(`${files.length} file${files.length === 1 ? "" : "s"} uploaded.`);
+
+    await saveAndRender(`${newDrawings.length} file${newDrawings.length === 1 ? “” : “s”} uploaded.`);
+
+    // Auto-trigger AI analysis for each successfully stored file.
+    if (state.settings.aiTakeoffEnabled) {
+      for (const drawing of newDrawings) {
+        if (drawing.processingStatus !== “upload_failed”) {
+          await runAiTakeoffForDrawing(project, drawing.id);
+        }
+      }
+    }
   }
 
   async function openDocument(id) {
@@ -1636,17 +2027,70 @@
 
   async function deleteDocument(id) {
     const drawing = findById(state.drawings, id);
-    if (!drawing || !window.confirm(`Delete “${drawing.name}”?`)) return;
+    if (!drawing || !window.confirm(`Delete “${drawing.name}”?\n\nThis will also remove all measurements, scale calibrations, and AI results linked to this document.`)) return;
+
+    // Remove the drawing record and its stored file blob.
     state.drawings = state.drawings.filter((item) => item.id !== id);
     const db = await openDb();
-    await dbDelete(db, "files", id);
+    await dbDelete(db, “files”, id);
     revokePreviewUrl(id);
+
+    // Cascade-delete all records that reference this drawing so no orphans
+    // remain in search results, AI answers, or the drawing viewer.
+    state.drawingMeasurements = state.drawingMeasurements.filter(
+      (item) => item.sheetId !== id && item.drawingId !== id
+    );
+    state.drawingIssues = state.drawingIssues.filter(
+      (item) => item.sheetId !== id && item.drawingId !== id
+    );
+    state.drawingScaleCalibrations = state.drawingScaleCalibrations.filter(
+      (item) => item.sheetId !== id && item.drawingId !== id
+    );
+    state.drawingRevisionReviews = state.drawingRevisionReviews.filter(
+      (item) => item.sheetId !== id && item.drawingId !== id
+    );
+    // Remove AI takeoff runs that only covered this document; remove the
+    // page reference from runs that covered multiple documents.
+    const removedRunIds = new Set(
+      state.aiTakeoffRuns
+        .filter((run) => (run.pageIds || []).includes(id) && (run.pageIds || []).length === 1)
+        .map((run) => run.id)
+    );
+    state.aiTakeoffRuns = state.aiTakeoffRuns
+      .map((run) => ({ ...run, pageIds: (run.pageIds || []).filter((pid) => pid !== id) }))
+      .filter((run) => (run.pageIds || []).length > 0);
+
+    // Remove takeoff measurements and scope detections that came from this document.
+    state.takeoffMeasurements = state.takeoffMeasurements.filter(
+      (item) => item.drawingId !== id && item.sourceMeasurementId !== id
+    );
+    state.scopeDetections = state.scopeDetections.filter(
+      (item) => item.drawingId !== id && !removedRunIds.has(item.sourceRunId)
+    );
+
+    // Clear the rfis that are pinned to this drawing.
+    state.rfis = state.rfis.filter(
+      (item) => item.sheetId !== id && item.drawingId !== id
+    );
+
     if (state.settings.activeDrawingIdByProject[drawing.projectId] === id) {
       const next = filterByProject(state.drawings, drawing.projectId)[0];
       state.settings.activeDrawingIdByProject[drawing.projectId] = next ? next.id : null;
     }
-    addActivity(state, drawing.projectId, "document.deleted", `Deleted document “${drawing.name}”.`);
-    await saveAndRender("Document deleted.");
+    addActivity(state, drawing.projectId, “document.deleted”, `Deleted document “${drawing.name}”.`);
+    await saveAndRender(“Document deleted.”);
+  }
+
+  async function reprocessDocument(id) {
+    const drawing = findById(state.drawings, id);
+    if (!drawing) return;
+    const project = findById(state.projects, drawing.projectId);
+    if (!project) return;
+    // Switch active drawing to this one, then run AI takeoff.
+    state.settings.activeDrawingIdByProject[drawing.projectId] = id;
+    state.settings.activeProjectId = drawing.projectId;
+    await saveState();
+    await runAiTakeoffForDrawing(project, id);
   }
 
   async function selectDrawing(id) {
@@ -1771,6 +2215,93 @@
     return [data.currentSheetId].filter(Boolean);
   }
 
+  function aiTakeoffRoomsToTakeoffRows(run, projectId) {
+    const timestamp = nowIso();
+    return aiTakeoffRooms(run).flatMap((room) => {
+      const rows = [];
+      if (room.wallSf) {
+        rows.push({
+          id: createId("takeoff"),
+          projectId,
+          drawingId: room.pageId || "",
+          scopeCategory: "paint",
+          name: `${room.name} — Wall paint`,
+          quantity: room.wallSf,
+          unit: "SF",
+          wallSf: room.wallSf,
+          ceilingSf: 0,
+          paintSf: room.wallSf,
+          confidence: room.confidence,
+          paintFinish: room.paintFinish || "",
+          notes: room.assumptions?.join("; ") || "",
+          sourceType: "ai-takeoff",
+          sourceMeasurementId: room.id,
+          status: "detected",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      if (room.ceilingSf) {
+        rows.push({
+          id: createId("takeoff"),
+          projectId,
+          drawingId: room.pageId || "",
+          scopeCategory: "ceilings",
+          name: `${room.name} — Ceiling paint`,
+          quantity: room.ceilingSf,
+          unit: "SF",
+          wallSf: 0,
+          ceilingSf: room.ceilingSf,
+          paintSf: room.ceilingSf,
+          confidence: room.confidence,
+          notes: "",
+          sourceType: "ai-takeoff",
+          sourceMeasurementId: room.id,
+          status: "detected",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      return rows;
+    });
+  }
+
+  function aiDrywallToScopeDetections(run, projectId) {
+    const timestamp = nowIso();
+    const allAssemblies = (run.pages || []).flatMap((page) => (page.drywallAssemblies || []).map((a) => ({ ...a, pageId: a.pageId || page.pageId })));
+    return allAssemblies.map((asm) => ({
+      id: createId("scope"),
+      projectId,
+      drawingId: asm.pageId || "",
+      title: `${asm.wallType} — Drywall partition`,
+      description: [
+        asm.lengthLf ? `${asm.lengthLf} LF` : null,
+        asm.heightFt ? `${asm.heightFt} ft high` : null,
+        asm.studSize ? `${asm.studSize} studs` : null,
+        asm.studSpacing || null,
+        asm.gwbLayers > 1 ? `${asm.gwbLayers} layers GWB` : null,
+        asm.fireRating || null,
+        asm.soundRating || null,
+        asm.isShaftWall ? "Shaft wall" : null,
+      ].filter(Boolean).join(", "),
+      category: "drywall",
+      quantity: asm.lengthLf || null,
+      unit: "LF",
+      areaSf: asm.areaSf || null,
+      wallType: asm.wallType,
+      fireRating: asm.fireRating || "",
+      soundRating: asm.soundRating || "",
+      locationDescription: asm.locationDescription || "",
+      confidence: asm.confidence || 0,
+      status: "detected",
+      assumptions: asm.assumptions || [],
+      sourceType: "ai-takeoff",
+      sourceRunId: run.id,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+  }
+
   async function runAiTakeoff() {
     const project = getActiveProject();
     if (!project) return;
@@ -1786,13 +2317,22 @@
       render();
       return;
     }
+    await runAiTakeoffForDrawing(project, activeId);
+  }
+
+  async function runAiTakeoffForDrawing(project, drawingId) {
+    if (!state.settings.aiTakeoffEnabled) {
+      pushToast("AI takeoff is disabled in settings.");
+      render();
+      return;
+    }
     statefulUi.aiTakeoffStage = "Uploading";
-    statefulUi.aiProcessingState = { status: "processing", progress: 8, sheetStatuses: [{ sheetId: activeId, status: "queued" }] };
+    statefulUi.aiProcessingState = { status: "processing", progress: 8, sheetStatuses: [{ sheetId: drawingId, status: "queued" }] };
     render();
     try {
       const run = await drawingServices.measurementService.runPaintingTakeoff({
         projectId: project.id,
-        pageIds: [activeId],
+        pageIds: [drawingId],
         scope: "painting",
         ceilingHeightFt: 9,
         includeDoors: true,
@@ -1800,15 +2340,37 @@
         includeTrim: true,
         onProgress: (stage, progress) => {
           statefulUi.aiTakeoffStage = stage;
-          statefulUi.aiProcessingState = { status: "processing", progress, sheetStatuses: [{ sheetId: activeId, status: stage }] };
+          statefulUi.aiProcessingState = { status: "processing", progress, sheetStatuses: [{ sheetId: drawingId, status: stage }] };
           render();
         },
       });
       state.aiTakeoffRuns.push(run);
+
+      // Mark the drawing as processed so the Document register reflects status.
+      const drawing = findById(state.drawings, drawingId);
+      if (drawing) {
+        drawing.processingStatus = run.status === "complete" ? "ai_complete" : "ai_failed";
+        drawing.updatedAt = nowIso();
+      }
+
+      // Propagate rooms to takeoff measurements (paint scope).
+      if (run.status === "complete") {
+        const paintRows = aiTakeoffRoomsToTakeoffRows(run, project.id);
+        state.takeoffMeasurements.push(...paintRows);
+
+        // Propagate drywall assemblies to scope detections.
+        const drywallRows = aiDrywallToScopeDetections(run, project.id);
+        state.scopeDetections.push(...drywallRows);
+      }
+
       statefulUi.aiTakeoffStage = "Complete";
-      statefulUi.aiProcessingState = { status: "complete", progress: 100, sheetStatuses: [{ sheetId: activeId, status: "complete" }] };
-      addActivity(state, project.id, "ai.takeoff", `AI painting takeoff ${run.status === "complete" ? "completed" : "recorded"} for 1 sheet.`);
-      await saveAndRender(run.status === "not_configured" ? "AI provider not configured. Manual takeoff remains available." : "AI takeoff complete.");
+      statefulUi.aiProcessingState = { status: "complete", progress: 100, sheetStatuses: [{ sheetId: drawingId, status: "complete" }] };
+      addActivity(state, project.id, "ai.takeoff", `AI drywall + painting takeoff ${run.status === "complete" ? "completed" : "recorded"} for 1 sheet.`);
+      await saveAndRender(
+        run.status === "not_configured" ? "AI provider not configured. Manual takeoff remains available." :
+        run.status === "failed" ? `AI takeoff failed: ${(run.warnings && run.warnings[0]) || "Unknown error"}` :
+        "AI takeoff complete."
+      );
     } catch (error) {
       statefulUi.aiProcessingState = { status: "failed", progress: 0, error: error instanceof Error ? error.message : String(error) };
       pushToast("AI takeoff failed.");
@@ -1893,6 +2455,66 @@
     statefulUi.modal = null;
     addActivity(state, project.id, "drawing.scale", `Updated scale for drawing sheet.`);
     await saveAndRender("Scale calibration saved.");
+  }
+
+  function openEditAiRoom(runId, roomId) {
+    const run = state.aiTakeoffRuns.find((r) => r.id === runId);
+    if (!run) return;
+    const room = aiTakeoffRooms(run).find((r) => r.id === roomId);
+    if (!room) return;
+    openModal("aiRoom", { runId, roomId, ...room });
+  }
+
+  function openEditAiAssembly(runId, asmId) {
+    const run = state.aiTakeoffRuns.find((r) => r.id === runId);
+    if (!run) return;
+    const asm = (run.pages || []).flatMap((p) => p.drywallAssemblies || []).find((a) => a.id === asmId);
+    if (!asm) return;
+    openModal("aiAssembly", { runId, asmId, ...asm });
+  }
+
+  async function submitAiRoomEdit(data) {
+    const run = state.aiTakeoffRuns.find((r) => r.id === data.runId);
+    if (!run) return;
+    for (const page of run.pages || []) {
+      const room = (page.rooms || []).find((r) => r.id === data.roomId);
+      if (room) {
+        room.wallSf = numberValue(data.wallSf) ?? room.wallSf;
+        room.ceilingSf = numberValue(data.ceilingSf) ?? room.ceilingSf;
+        room.doorCount = numberValue(data.doorCount) ?? room.doorCount;
+        room.windowCount = numberValue(data.windowCount) ?? room.windowCount;
+        room.trimLf = numberValue(data.trimLf) ?? room.trimLf;
+        room.paintFinish = cleanText(data.paintFinish);
+        room.confidence = numberValue(data.confidence) ?? room.confidence;
+        break;
+      }
+    }
+    run.updatedAt = nowIso();
+    statefulUi.modal = null;
+    await saveAndRender("AI room updated.");
+  }
+
+  async function submitAiAssemblyEdit(data) {
+    const run = state.aiTakeoffRuns.find((r) => r.id === data.runId);
+    if (!run) return;
+    for (const page of run.pages || []) {
+      const asm = (page.drywallAssemblies || []).find((a) => a.id === data.asmId);
+      if (asm) {
+        asm.lengthLf = numberValue(data.lengthLf) ?? asm.lengthLf;
+        asm.heightFt = numberValue(data.heightFt) ?? asm.heightFt;
+        asm.areaSf = numberValue(data.areaSf) ?? asm.areaSf;
+        asm.gwbLayers = numberValue(data.gwbLayers) ?? asm.gwbLayers;
+        asm.studSize = cleanText(data.studSize);
+        asm.studSpacing = cleanText(data.studSpacing);
+        asm.fireRating = cleanText(data.fireRating);
+        asm.soundRating = cleanText(data.soundRating);
+        asm.confidence = numberValue(data.confidence) ?? asm.confidence;
+        break;
+      }
+    }
+    run.updatedAt = nowIso();
+    statefulUi.modal = null;
+    await saveAndRender("Drywall assembly updated.");
   }
 
   async function submitDrawingMeasurementEdit(data) {
@@ -2664,6 +3286,28 @@
       userEmail: cleanText(data.userEmail),
     });
     await saveAndRender("Settings saved.");
+  }
+
+  async function submitAiProviderSettings(data) {
+    const override = cleanText(data.aiProviderOverride);
+    Object.assign(state.settings, {
+      aiProviderOverride: override,
+      aiApiKeyOverride: cleanText(data.aiApiKeyOverride),
+      aiModelOverride: cleanText(data.aiModelOverride),
+      aiBaseUrlOverride: cleanText(data.aiBaseUrlOverride),
+    });
+    // Merge overrides into window.TAKEOFF_AI_CONFIG so the AI engine picks
+    // them up immediately without requiring a restart.
+    if (typeof window.TAKEOFF_AI_CONFIG === "object" && window.TAKEOFF_AI_CONFIG) {
+      if (override) window.TAKEOFF_AI_CONFIG.provider = override;
+      if (data.aiApiKeyOverride) window.TAKEOFF_AI_CONFIG.apiKey = cleanText(data.aiApiKeyOverride);
+      if (data.aiModelOverride) {
+        window.TAKEOFF_AI_CONFIG.takeoffModel = cleanText(data.aiModelOverride);
+        window.TAKEOFF_AI_CONFIG.chatModel = cleanText(data.aiModelOverride);
+      }
+      if (data.aiBaseUrlOverride) window.TAKEOFF_AI_CONFIG.baseUrl = cleanText(data.aiBaseUrlOverride);
+    }
+    await saveAndRender("AI provider settings saved.");
   }
 
   function exportWorkspace() {

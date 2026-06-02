@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +27,85 @@ else:
     _ASSETS_DIR = Path(__file__).parent / "assets"
 
 _UI_HTML = _ASSETS_DIR / "estimator_ui.html"
+
+
+def _safe_int(value: str | None, default: int) -> int:
+    try:
+        return int(value or "")
+    except (ValueError, TypeError):
+        return default
+
+
+def _resolve_api_key(provider: str) -> str:
+    """Return the correct API key for the given provider name.
+
+    Provider-specific env vars take priority so the frontend receives the
+    right credential without requiring the user to duplicate it into AI_API_KEY.
+    """
+    if provider == "openai":
+        return (
+            os.getenv("OPENAI_API_KEY", "").strip()
+            or os.getenv("AI_API_KEY", "").strip()
+        )
+    if provider == "anthropic":
+        return (
+            os.getenv("ANTHROPIC_API_KEY", "").strip()
+            or os.getenv("AI_API_KEY", "").strip()
+        )
+    if provider == "deepseek":
+        return (
+            os.getenv("DEEPSEEK_API_KEY", "").strip()
+            or os.getenv("AI_API_KEY", "").strip()
+        )
+    # lmstudio and unknown providers
+    return os.getenv("AI_API_KEY", "lm-studio-local").strip() or "lm-studio-local"
+
+
+def _build_ai_config_script() -> str:
+    """Return a <script> tag injecting AI provider config from environment variables.
+
+    OAuth / ChatGPT sign-in is not supported by the OpenAI API for desktop
+    applications.  The OpenAI API requires an API key.  This limitation is
+    documented here so the abstraction can be upgraded if OpenAI adds an
+    OAuth-compatible path for desktop runtimes in the future.
+    """
+    provider = os.getenv("AI_PROVIDER", "").strip()
+    deepseek_key_configured = bool(
+        os.getenv("DEEPSEEK_API_KEY", "").strip()
+        or (provider == "deepseek" and os.getenv("AI_API_KEY", "").strip())
+    )
+    # baseUrl must point to the correct endpoint for the active provider.
+    # For DeepSeek, always use the DeepSeek API regardless of AI_BASE_URL.
+    deepseek_base = "https://api.deepseek.com/v1"
+    base_url = (
+        deepseek_base
+        if provider == "deepseek"
+        else os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    )
+    config = {
+        "provider": provider,
+        "baseUrl": base_url,
+        "apiKey": _resolve_api_key(provider),
+        "chatModel": os.getenv("AI_CHAT_MODEL", "").strip(),
+        "takeoffModel": os.getenv("AI_TAKEOFF_MODEL", "").strip(),
+        "supportsVision": os.getenv("AI_SUPPORTS_VISION", "").strip().lower()
+        in ("true", "1", "yes"),
+        "maxTokens": _safe_int(os.getenv("AI_MAX_TOKENS"), 4096),
+        # Provider cascade: OpenAI → DeepSeek (backup) → LM Studio
+        "deepseekKeyConfigured": deepseek_key_configured,
+        "deepseekBaseUrl": "https://api.deepseek.com/v1",
+        "deepseekModel": os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip(),
+        # OAuth limitation notice surfaced in the settings UI.
+        "oauthAvailable": False,
+        "oauthNote": (
+            "OpenAI Codex OAuth / ChatGPT sign-in is not available for "
+            "desktop applications via the OpenAI API. An API key is required. "
+            "Configure OPENAI_API_KEY in your .env file. "
+            "DeepSeek is available as an automatic backup — configure "
+            "DEEPSEEK_API_KEY in your .env file or enter it in Settings."
+        ),
+    }
+    return f"<script>window.TAKEOFF_AI_CONFIG = {json.dumps(config)};</script>"
 
 
 class EstimatorWebPanel(QWidget):
@@ -61,8 +142,10 @@ class EstimatorWebPanel(QWidget):
                 QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,
                 True,
             )
+            html = _UI_HTML.read_bytes().decode("utf-8")
+            html = html.replace("<head>", f"<head>{_build_ai_config_script()}", 1)
             self._view.setContent(
-                _UI_HTML.read_bytes(),
+                html.encode("utf-8"),
                 "text/html; charset=utf-8",
                 QUrl.fromLocalFile(str(_UI_HTML)),
             )

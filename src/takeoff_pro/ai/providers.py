@@ -30,6 +30,8 @@ _VISION_KEYWORDS: frozenset[str] = frozenset(
         "qvq",
         "smolvlm",
         "gemma3",
+        "gemma4",
+        "gemma-4",
         "magistral",
     }
 )
@@ -193,8 +195,33 @@ class LmStudioVisionProvider:
                     "Start LM Studio and enable the Local Server."
                 )
                 raise AiProviderError(msg) from exc
+            if "404" in raw:
+                msg = (
+                    f"Wrong endpoint: {url} returned 404. "
+                    "Ensure AI_BASE_URL ends with /v1 (e.g. http://127.0.0.1:1234/v1)."
+                )
+                raise AiProviderError(msg) from exc
+            if "503" in raw or "model not loaded" in raw.lower():
+                msg = (
+                    f"LM Studio returned 503 — model '{model}' may not be loaded. "
+                    "Load the model in LM Studio and try again."
+                )
+                raise AiProviderError(msg) from exc
+            if "422" in raw or "unsupported" in raw.lower():
+                msg = (
+                    f"LM Studio rejected the request ({raw}). "
+                    "Check that the model supports vision/multimodal input."
+                )
+                raise AiProviderError(msg) from exc
             raise
-        return _extract_chat_completions_text(data)
+        try:
+            return _extract_chat_completions_text(data)
+        except AiProviderError as exc:
+            msg = (
+                f"Response parse failed: {exc}. "
+                "The model may have returned non-JSON or an unexpected structure."
+            )
+            raise AiProviderError(msg) from exc
 
     def _resolve_model(self) -> str:
         """Auto-select the first model loaded in LM Studio."""
@@ -248,70 +275,264 @@ class AiHealthResult:
 
 
 def check_ai_health() -> AiHealthResult:
-    """Return a health-check snapshot for the currently configured AI provider.
+    """Return a cascade health-check snapshot.
 
-    Safe to call at any time; never raises — errors are captured in
-    ``AiHealthResult.warnings``.
+    Always reports the fixed priority order:
+      1. OpenAI Codex (primary — mandatory)
+      2. DeepSeek     (backup — only if OpenAI fails)
+      3. LM Studio    (last resort)
+
+    Safe to call at any time; never raises.
     """
     result = AiHealthResult()
-    provider_name = os.getenv("AI_PROVIDER", "openai").strip().lower()
-    result.provider = provider_name
+    result.provider = "cascade: deepseek → openai → lmstudio"
     result.takeoff_model = os.getenv("AI_TAKEOFF_MODEL", "").strip()
     result.chat_model = os.getenv("AI_CHAT_MODEL", "").strip()
 
-    if provider_name == "lmstudio":
-        base_url = os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").strip()
-        api_key = os.getenv("AI_API_KEY", "lm-studio-local").strip() or "lm-studio-local"
-        models = _list_lmstudio_models(base_url, api_key)
-        result.base_url_reachable = models is not None
-        result.models = models if models is not None else []
-        # configured=True when the base URL is reachable; model availability is
-        # communicated separately via warnings so the caller can distinguish the
-        # two states ("LM Studio unreachable" vs "running but no model loaded").
-        result.configured = result.base_url_reachable
-        if not result.base_url_reachable:
-            result.warnings.append(
-                f"LM Studio is not reachable at {base_url}. "
-                "Start LM Studio and enable the Local Server."
-            )
-        elif not result.models:
-            result.warnings.append(
-                "LM Studio is reachable, but no model is loaded. "
-                "Load a model in LM Studio and try again."
-            )
-        else:
-            active = result.takeoff_model or result.models[0]
-            result.supports_vision = _detect_vision_support(active)
-            if result.supports_vision == "false":
-                result.warnings.append(
-                    "Text chat is available, but image-based scope detection "
-                    "requires a vision model. Load a model with vision support "
-                    "(e.g. LLaVA, Qwen-VL, Pixtral)."
-                )
-
-    elif provider_name == "anthropic":
-        key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-        result.configured = bool(key)
+    # --- DeepSeek (primary) -------------------------------------------------
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if deepseek_key:
+        result.configured = True
         result.base_url_reachable = True
-        result.supports_vision = "true"
-        if not key:
-            result.warnings.append("ANTHROPIC_API_KEY is not set.")
-
-    elif provider_name == "openai":
-        key = os.getenv("OPENAI_API_KEY", "").strip()
-        result.configured = bool(key)
-        result.base_url_reachable = True
-        result.supports_vision = "true"
-        if not key:
-            result.warnings.append("OPENAI_API_KEY is not set.")
-
+        result.supports_vision = "false"
+        result.models.append("deepseek:deepseek-chat (primary — ready)")
+        result.warnings.append(
+            "DeepSeek does not support image input on its public API.  "
+            "PDF text extraction is used in place of page images."
+        )
     else:
         result.warnings.append(
-            f"Unknown AI_PROVIDER '{provider_name}'. "
-            "Valid values: lmstudio, openai, anthropic."
+            "DEEPSEEK_API_KEY is not set — DeepSeek is the primary provider.  "
+            "Add it to your .env file."
+        )
+
+    # --- OpenAI (secondary) -------------------------------------------------
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if openai_key:
+        result.configured = True
+        result.supports_vision = "true"
+        result.models.append("openai:gpt-4.1-mini (secondary — ready)")
+    else:
+        result.warnings.append(
+            "OPENAI_API_KEY is not set — OpenAI is inactive.  "
+            "Add it to your .env file to enable it as a secondary provider."
+        )
+
+    # --- LM Studio (last resort) --------------------------------------------
+    base_url = os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    lm_api_key = os.getenv("AI_API_KEY", "lm-studio-local").strip() or "lm-studio-local"
+    lm_models = _list_lmstudio_models(base_url, lm_api_key)
+    if lm_models is not None:
+        result.base_url_reachable = True
+        if lm_models:
+            result.configured = True
+            result.models.append(f"lmstudio:{lm_models[0]} (last resort — ready)")
+        else:
+            result.warnings.append(
+                "LM Studio is reachable but no model is loaded — "
+                "load a model in LM Studio if you want local fallback."
+            )
+    else:
+        result.warnings.append(
+            f"LM Studio is not reachable at {base_url} — "
+            "this is normal if you do not run LM Studio locally."
+        )
+
+    if not result.configured:
+        result.warnings.append(
+            "No AI provider is configured.  "
+            "Set OPENAI_API_KEY (primary) and/or DEEPSEEK_API_KEY (backup) in your .env file."
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek provider (backup when OpenAI / Codex is unavailable)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeepSeekProvider:
+    """DeepSeek API adapter — OpenAI-compatible, used as automatic backup.
+
+    DeepSeek's public API (``api.deepseek.com``) is OpenAI-compatible and
+    accepts the same ``/v1/chat/completions`` format.  It does not currently
+    support image/vision input; when image paths are supplied they are ignored
+    and only the text prompt is sent.  Set ``AI_PROVIDER=deepseek`` and
+    ``DEEPSEEK_API_KEY`` (or ``AI_API_KEY``) in your ``.env`` file.
+    """
+
+    api_key: str | None = None
+    model: str = "deepseek-chat"
+    name: str = "deepseek"
+
+    def is_configured(self) -> bool:
+        """Return whether a DeepSeek API key is available."""
+        return bool(self.api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AI_API_KEY"))
+
+    def run_vision_json(self, *, prompt: str, image_paths: list[Path]) -> str:  # noqa: ARG002
+        """Call DeepSeek chat completions and return JSON text.
+
+        Image paths are accepted for interface compatibility but not forwarded
+        because DeepSeek does not currently support image input on its public
+        API.  The text prompt is sent alone; callers should include OCR or
+        page-text extracts in the prompt when image analysis is required.
+        """
+        api_key = self.api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AI_API_KEY")
+        if not api_key:
+            raise AiProviderNotConfiguredError(
+                "DeepSeek API key is not configured.  Set DEEPSEEK_API_KEY in your .env file "
+                "or enter the key in Settings → AI provider → API key override."
+            )
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 6000,
+        }
+        url = "https://api.deepseek.com/chat/completions"
+        LOGGER.info("AI provider: deepseek model=%s", self.model)
+        try:
+            data = _post_json(url, api_key, body)
+        except AiProviderError as exc:
+            raw = str(exc)
+            if "401" in raw:
+                raise AiProviderError(
+                    "DeepSeek API key rejected (HTTP 401).  Verify DEEPSEEK_API_KEY in your "
+                    ".env file or update it in Settings → AI provider."
+                ) from exc
+            if "402" in raw:
+                raise AiProviderError(
+                    "DeepSeek account balance is insufficient (HTTP 402).  "
+                    "Top up at platform.deepseek.com."
+                ) from exc
+            if "429" in raw:
+                raise AiProviderError(
+                    "DeepSeek rate limit reached (HTTP 429).  "
+                    "Wait before retrying."
+                ) from exc
+            raise
+        return _extract_chat_completions_text(data)
+
+
+# ---------------------------------------------------------------------------
+# OAuth provider placeholder
+# ---------------------------------------------------------------------------
+
+# NOTE: OpenAI Codex OAuth / ChatGPT sign-in is NOT supported by the OpenAI
+# API for desktop (non-web) applications.  The OpenAI API only supports API
+# key authentication.  "ChatGPT sign-in" OAuth is specific to ChatGPT plugin
+# web flows and cannot be used to call the OpenAI Responses/Chat Completions
+# API from a PyQt6 desktop runtime.
+#
+# This placeholder class documents the intended interface so that if OpenAI
+# ever provides an OAuth-compatible path for desktop runtimes, the concrete
+# implementation can be added here without changing any call sites.
+
+
+@dataclass(frozen=True)
+class OpenAiOAuthProvider:
+    """Placeholder for future OpenAI OAuth / ChatGPT sign-in authentication.
+
+    This class documents the intended interface.  It is *not yet functional*
+    because the OpenAI API does not support OAuth-based authentication for
+    desktop applications.  Set ``AI_PROVIDER=openai`` and provide
+    ``OPENAI_API_KEY`` as an environment variable until an OAuth path becomes
+    available.
+    """
+
+    model: str = "gpt-4o"
+    name: str = "openai_oauth"
+
+    def is_configured(self) -> bool:
+        """Return False — OAuth is not yet available for this runtime."""
+        return False
+
+    def run_vision_json(self, *, prompt: str, image_paths: list[Path]) -> str:
+        """Raise an informative error — OAuth is not yet implemented."""
+        msg = (
+            "OpenAI OAuth / ChatGPT sign-in is not supported for desktop "
+            "applications.  Set AI_PROVIDER=openai and configure "
+            "OPENAI_API_KEY in your .env file to use the OpenAI API."
+        )
+        raise AiProviderNotConfiguredError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Cascading provider (OpenAI → DeepSeek → LM Studio)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CascadingProvider:
+    """Tries providers in priority order; falls back automatically on failure.
+
+    Priority is fixed:
+      1. OpenAI Codex (primary — mandatory)
+      2. DeepSeek      (automatic backup — only if OpenAI fails)
+      3. LM Studio     (last resort — local, no key required)
+
+    A provider is skipped at attempt time only when it explicitly has no
+    credential (``is_configured()`` returns False).  An API error from a
+    configured provider causes fallback to the next tier so transient
+    failures or rate limits do not break the run.
+    """
+
+    providers: list[AiVisionProvider]
+
+    @property
+    def name(self) -> str:
+        """Return the name of the first ready provider."""
+        for p in self.providers:
+            if p.is_configured():
+                return p.name
+        return "none"
+
+    @property
+    def model(self) -> str:
+        """Return the model of the first ready provider."""
+        for p in self.providers:
+            if p.is_configured():
+                return p.model
+        return ""
+
+    def is_configured(self) -> bool:
+        """Return True when at least one provider is ready."""
+        return any(p.is_configured() for p in self.providers)
+
+    def run_vision_json(self, *, prompt: str, image_paths: list[Path]) -> str:
+        """Try each provider in order; fall back on any failure."""
+        last_error: Exception | None = None
+        for provider in self.providers:
+            if not provider.is_configured():
+                LOGGER.debug("Cascade: skipping %s — not configured.", provider.name)
+                continue
+            try:
+                LOGGER.info("Cascade: attempting provider=%s", provider.name)
+                result = provider.run_vision_json(prompt=prompt, image_paths=image_paths)
+                LOGGER.info("Cascade: succeeded with provider=%s", provider.name)
+                return result
+            except AiProviderNotConfiguredError as exc:
+                LOGGER.warning("Cascade: %s not configured — %s", provider.name, exc)
+                last_error = exc
+            except AiProviderError as exc:
+                LOGGER.warning(
+                    "Cascade: %s failed (%s) — falling back to next provider.",
+                    provider.name,
+                    exc,
+                )
+                last_error = exc
+        if last_error is not None:
+            raise AiProviderError(
+                f"All configured providers failed.  Last error: {last_error}"
+            ) from last_error
+        raise AiProviderNotConfiguredError(
+            "No AI provider is configured.  "
+            "Set OPENAI_API_KEY in your .env file (primary) or "
+            "DEEPSEEK_API_KEY as a backup.  "
+            "LM Studio will be used as a last resort when running locally."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -320,34 +541,45 @@ def check_ai_health() -> AiHealthResult:
 
 
 def provider_from_env() -> AiVisionProvider:
-    """Return the configured AI provider selected by environment variables."""
-    provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
+    """Return a CascadingProvider with DeepSeek as the primary provider.
+
+    Priority:
+      1. DeepSeek   — primary.  Requires DEEPSEEK_API_KEY.
+      2. OpenAI     — secondary.  Activates automatically when OPENAI_API_KEY is added.
+      3. LM Studio  — last resort.  Local, no key required.
+    """
     model = os.getenv("AI_TAKEOFF_MODEL", "").strip()
 
-    if provider == "anthropic":
-        return AnthropicVisionProvider(model=model or "claude-3-5-sonnet-latest")
+    # --- 1. DeepSeek (primary) ----------------------------------------------
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    deepseek_provider: AiVisionProvider = DeepSeekProvider(
+        api_key=deepseek_key or None,
+        model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip() or "deepseek-chat",
+    )
 
-    if provider == "openai":
-        return OpenAiVisionProvider(model=model or "gpt-4.1-mini")
+    # --- 2. OpenAI (secondary — activates when key is added) ---------------
+    openai_provider: AiVisionProvider = OpenAiVisionProvider(
+        model=model or "gpt-4.1-mini"
+    )
 
-    if provider == "lmstudio":
-        base_url = os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").strip()
-        api_key = os.getenv("AI_API_KEY", "lm-studio-local").strip() or "lm-studio-local"
-        if not base_url:
-            msg = (
-                "AI_PROVIDER=lmstudio requires AI_BASE_URL "
-                "(e.g. AI_BASE_URL=http://127.0.0.1:1234/v1)."
-            )
-            raise AiProviderNotConfiguredError(msg)
-        LOGGER.info(
-            "AI provider selected: lmstudio base_url=%s model=%s",
-            base_url,
-            model or "(auto)",
-        )
-        return LmStudioVisionProvider(base_url=base_url, api_key=api_key, model=model)
+    # --- 3. LM Studio (last resort — local) --------------------------------
+    lm_base_url = os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    lm_api_key = os.getenv("AI_API_KEY", "lm-studio-local").strip() or "lm-studio-local"
+    lmstudio_provider: AiVisionProvider = LmStudioVisionProvider(
+        base_url=lm_base_url,
+        api_key=lm_api_key,
+        model=model,
+    )
 
-    msg = f"Unknown AI_PROVIDER '{provider}'. Valid values: lmstudio, openai, anthropic."
-    raise AiProviderNotConfiguredError(msg)
+    cascade = CascadingProvider(
+        providers=[deepseek_provider, openai_provider, lmstudio_provider]
+    )
+    LOGGER.info(
+        "AI cascade built: deepseek(configured=%s) → openai(configured=%s) → lmstudio",
+        deepseek_provider.is_configured(),
+        openai_provider.is_configured(),
+    )
+    return cascade
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +661,12 @@ def _post_json(
     except urllib.error.URLError as exc:
         msg = f"AI provider request failed: {exc}"
         raise AiProviderError(msg) from exc
-    value: Any = json.loads(payload)
+    try:
+        value: Any = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        snippet = payload[:200]
+        msg = f"AI provider returned non-JSON response: {snippet!r}"
+        raise AiProviderError(msg) from exc
     if not isinstance(value, dict):
         msg = "AI provider returned a non-object response."
         raise AiProviderError(msg)

@@ -1,58 +1,76 @@
-"""Application bootstrap for Takeoff Pro."""
+"""Application entry point for Takeoff Pro desktop app."""
 
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
 
-from takeoff_pro.ui.main_window import MainWindow
+def _load_dotenv() -> None:
+    """Load .env from the project root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
 
-LOGGER = logging.getLogger(__name__)
+        candidate = Path(__file__).resolve().parent.parent.parent / ".env"
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+    except ImportError:
+        pass
 
 
 def configure_logging() -> None:
-    """Configure the application logger."""
+    """Configure application-wide logging."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
     )
 
 
-def create_application(argv: Sequence[str] | None = None) -> QApplication:
-    """Create or return the active Qt application."""
-    existing_app = QApplication.instance()
-    if existing_app is not None:
-        if isinstance(existing_app, QApplication):
-            existing_app.setApplicationName("Takeoff Pro")
-            existing_app.setOrganizationName("Takeoff Pro Contributors")
-            return existing_app
-        msg = "An incompatible Qt application instance is already running."
-        raise RuntimeError(msg)
+def create_application(argv: Sequence[str] | None = None) -> object:
+    """Create and return the QApplication instance.
 
-    # Required for Qt WebEngine on Windows (must be set before QApplication)
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    Parameters
+    ----------
+    argv:
+        Command-line arguments passed to Qt.  Defaults to ``sys.argv``.
 
-    args = list(argv) if argv is not None else sys.argv
-    app = QApplication(args)
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError as exc:
+        sys.exit(f"PyQt6 is required but could not be imported: {exc}")
+
+    app = QApplication(list(argv) if argv is not None else sys.argv)
     app.setApplicationName("Takeoff Pro")
-    app.setOrganizationName("Takeoff Pro Contributors")
+    app.setOrganizationName("Takeoff Pro")
     return app
 
 
 def run(argv: Sequence[str] | None = None) -> int:
-    """Run the desktop application event loop."""
+    """Start the desktop window and run the event loop.
+
+    Returns the process exit code (0 on clean exit).
+    """
+    _load_dotenv()
     configure_logging()
-    LOGGER.info("Starting Takeoff Pro")
+
+    # Suppress Qt WebEngine sandbox warnings on Windows.
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
     app = create_application(argv)
+
+    from takeoff_pro.ui.main_window import MainWindow
+
     window = MainWindow()
     window.show()
-    return app.exec()
+
+    return app.exec()  # type: ignore[attr-defined,no-any-return]
 
 
 def main() -> None:
-    """Run Takeoff Pro as a console script."""
-    raise SystemExit(run())
+    """Console script entry point."""
+    sys.exit(run(sys.argv))

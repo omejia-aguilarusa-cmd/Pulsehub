@@ -1510,6 +1510,92 @@ polyline.measurement-overlay {
   background: var(--blue);
 }
 
+/* ── Document drop zone ─────────────────────────────────────────────────── */
+
+.drop-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--line-strong);
+  border-radius: 12px;
+  padding: 24px 20px;
+  margin-bottom: 20px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  background: var(--soft);
+  user-select: none;
+}
+
+.drop-zone:hover,
+.drop-zone--active {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.drop-zone--busy {
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+}
+
+.drop-zone__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.drop-zone__inner svg {
+  color: var(--muted);
+}
+
+.drop-zone--active .drop-zone__inner svg {
+  color: var(--blue);
+}
+
+.drop-zone__inner p {
+  margin: 0;
+  font-size: 13.5px;
+}
+
+/* ── Row processing state ────────────────────────────────────────────────── */
+
+.row--processing {
+  background: var(--blue-soft);
+}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────── */
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: middle;
+}
+
+.spinner--small {
+  width: 9px;
+  height: 9px;
+  border-width: 1.5px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Tag info variant ────────────────────────────────────────────────────── */
+
+.tag.info {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
 .list {
   display: grid;
   gap: 10px;
